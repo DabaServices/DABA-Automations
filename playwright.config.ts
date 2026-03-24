@@ -24,7 +24,7 @@ export default defineConfig({
     // מאפשר ל-Agent להקליט את הצעדים שלו לצורך ניתוח שגיאות
     trace: 'on-first-retry',
 
-    headless: false,
+    headless: true,
 
     launchOptions: {
       slowMo: 600,
