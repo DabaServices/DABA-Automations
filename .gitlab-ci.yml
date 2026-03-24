@@ -25,7 +25,9 @@ install:
 smoke-tests:
   stage: test              # שיוך לשלב ה-test
   script:
-    - npx playwright test --grep @smoke # הרצת הטסטים שמתוייגים במילה @smoke בלבד
+     - npm ci                       # התקנת הספריות
+     - npx playwright install --with-deps # התקנת הדפדפנים (חשוב!)
+     - npx playwright test --grep @smoke --headless # כאן הוספנו את הדגל
   artifacts:               # הגדרת "תוצרים" שנרצה לשמור מהריצה
     when: always           # שמור את התוצרים גם אם הטסט עבר וגם אם נכשל
     paths:
