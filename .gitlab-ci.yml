@@ -1,0 +1,29 @@
+image: mcr.microsoft.com/playwright:v1.41.0-jammy
+
+stages:
+  - install
+  - test
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - node_modules/
+
+install:
+  stage: install
+  script:
+    - npm ci
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+smoke-tests:
+  stage: test
+  script:
+    - npx playwright test --grep @smoke
+  artifacts:
+    when: always
+    paths:
+      - playwright-report/
+    expire_in: 7 days
+  rules:
+    - when: always
