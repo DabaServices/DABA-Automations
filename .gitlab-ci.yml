@@ -1,5 +1,5 @@
 # מגדיר את ה"מכונה" (Docker Image) שתריץ את הקוד - גרסה רשמית של Playwright
-image: mcr.microsoft.com/playwright:v1.41.0-jammy
+image: mcr.microsoft.com/playwright:v1.58.2-jammy
 
 # מגדיר את סדר השלבים ב-Pipeline: קודם התקנות ואז הרצת טסטים
 stages:
