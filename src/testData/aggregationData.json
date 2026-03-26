@@ -1,0 +1,33 @@
+{
+  "hierarchicalAggregationTestData": [
+    {
+      "materialId": "000000001",
+      "description": "Hierarchical Aggregation Test - Matkal Level",
+      "unitsToExpand": [2, 11, 101],
+      "unitHierarchy": {
+        "2": [11],
+        "11": [101],
+        "101": [401, 701]
+      }
+    }
+  ],
+  "hierarchicalChangeTestData": [
+    {
+      "materialId": "000000001",
+      "description": "Hierarchical Change Test - Move Unit 12 from Parent 2 to Parent 3",
+      "unitsToExpand": [2, 11, 101],
+      "newHierarchy": [3, 12, 102],
+      "unitToMove": 102,
+      "newParentUnit": 12,
+      "oldParentUnit": 11,
+      "unitHierarchy": {
+        "2": [11],
+        "3": [12],
+        "11": [101],
+        "12": [102],
+        "101": [401, 701],
+        "102": [402, 702]
+      }
+    }
+  ]
+}

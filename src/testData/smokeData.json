@@ -1,0 +1,23 @@
+{
+  "makatValidationTestData": [
+    {
+      "index": 0,
+      "materialId": "000000001",
+      "description": "Material 1 - Basic Validation"
+    }
+  ],
+  "hierarchyExpansionTestData": [
+    {
+      "materialId": "000000001",
+      "description": "Hierarchical Aggregation Test - Matkal Level",
+      "unitsToExpand": [2, 11, 101]
+    }
+  ],
+  "leafCellClickabilityTestData": [
+    {
+      "materialId": "000000001",
+      "description": "Hierarchical Aggregation Test - Matkal Level",
+      "unitsToExpand": [2, 11, 101]
+    }
+  ]
+}

@@ -1237,46 +1237,6 @@ export class mainPage {
   }
 
   /**
-   * Unlock a parent unit in the hierarchy if it's locked
-   * 
-   * @param unitId - The unit ID to unlock
-   * @returns Promise<void>
-   */
-  async unlockParentUnit(unitId: number): Promise<void> {
-    console.log(`  Attempting to unlock unit ${unitId}...`);
-    
-    try {
-      // First, try to find the lock tooltip
-      const lockTooltip = this.page.locator(`[data-testid="unit-hierarchy-action-status-tooltip-${unitId}-wrapper"]`);
-      
-      const lockExists = await lockTooltip.isVisible({ timeout: 2000 }).catch(() => false);
-      
-      if (lockExists) {
-        console.log(`  ✓ Lock icon found, clicking to unlock...`);
-        await lockTooltip.click({ force: true });
-        
-        // Wait for dialog to appear
-        await this.page.waitForTimeout(300);
-        
-        // Click confirm button
-        const confirmBtn = this.page.locator(`[data-testid="unit-hierarchy-confirm-button-${unitId}"]`);
-        const confirmExists = await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false);
-        
-        if (confirmExists) {
-          await confirmBtn.click();
-          console.log(`  ✓ Unit ${unitId} unlocked successfully`);
-        } else {
-          console.log(`  ⚠ Confirm button not found for unit ${unitId}`);
-        }
-      } else {
-        console.log(`  ✓ Unit ${unitId} is not locked (lock icon not found)`);
-      }
-    } catch (error) {
-      console.log(`  ⚠ Error unlocking unit ${unitId}: ${error}`);
-    }
-  }
-
-  /**
    * Move a unit from one parent to another in the hierarchy drawer
    * 
    * @param unitId - The unit to move

@@ -1,5 +1,8 @@
 import { test, expect } from '../../src/fixtures';
-import { hierarchicalChangeTestData } from '../../src/testData/aggregationData';
+import aggregationData from '../../src/testData/aggregationData.json';
+import { lockUnitStatus } from '../../src/api/lockunitstatus';
+
+const hierarchicalChangeTestData = aggregationData.hierarchicalChangeTestData;
 
 /**
  * E2E Tests: Hierarchical Unit Relocation
@@ -78,10 +81,10 @@ const printUnitValues = (label: string, unitValuesMap: Map<number, number>, unit
 };
 
 hierarchicalChangeTestData.forEach((testData) => {
-  test(`test_hierarchicalChangeValuePreservation[${testData.description}]`, async ({ hierarchyPage }) => {
+  test(`test_hierarchicalChangeValuePreservation[${testData.description}]`, async ({ hierarchyPage, request }) => {
     test.setTimeout(120000);
 
-    const { materialId: makatId, originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, unitHierarchy } = testData;
+    const { materialId: makatId, unitsToExpand: originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, unitHierarchy } = testData;
     // Convert unit hierarchy object to Map for easier access
     const unitHierarchyMap = unitHierarchy ? new Map(Object.entries(unitHierarchy).map(([k, v]) => [parseInt(k), v])) : undefined;
     // Get all descendants of the unit we're moving
@@ -120,8 +123,12 @@ hierarchicalChangeTestData.forEach((testData) => {
       // SOURCE HIERARCHY: Expand up to and INCLUDING the old parent
       await hierarchyPage.expandHierarchyPath(originalHierarchy, oldParentUnit);
       
-      // Unlock the old parent if needed
-      await hierarchyPage.unlockParentUnit(oldParentUnit);
+      // Unlock the old parent via API if needed
+      try {
+        await lockUnitStatus(request, [oldParentUnit], 1, 0);
+      } catch (error) {
+        console.log(`  ⚠ Could not unlock via API: ${error}`);
+      }
 
       // Collapse the old hierarchy by clicking the highest parent
       await hierarchyPage.collapseHierarchyPath(originalHierarchy);
@@ -129,8 +136,12 @@ hierarchicalChangeTestData.forEach((testData) => {
       // TARGET HIERARCHY: Expand up to and INCLUDING the new parent
       await hierarchyPage.expandHierarchyPath(newHierarchy, newParentUnit);
 
-      // Unlock the new parent if needed
-      await hierarchyPage.unlockParentUnit(newParentUnit);
+      // Unlock the new parent via API if needed
+      try {
+        await lockUnitStatus(request, [newParentUnit], 1, 0);
+      } catch (error) {
+        console.log(`  ⚠ Could not unlock via API: ${error}`);
+      }
 
       // UNIT RELOCATION: Select and move the unit to new parent's combobox
       const comboboxInput = hierarchyPage.page.locator(`[data-testid="unit-hierarchy-node-combobox-${newParentUnit}-input"]`);
@@ -198,10 +209,10 @@ hierarchicalChangeTestData.forEach((testData) => {
 });
 
 hierarchicalChangeTestData.forEach((testData) => {
-  test(`test_hierarchicalChangeAggregation[${testData.description}]`, async ({ hierarchyPage }) => {
+  test(`test_hierarchicalChangeAggregation[${testData.description}]`, async ({ hierarchyPage, request }) => {
     test.setTimeout(120000);
 
-    const { materialId: makatId, originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, unitHierarchy } = testData;
+    const { materialId: makatId, unitsToExpand: originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, unitHierarchy } = testData;
     // Convert unit hierarchy object to Map for easier access
     const unitHierarchyMap = unitHierarchy ? new Map(Object.entries(unitHierarchy).map(([k, v]) => [parseInt(k), v])) : undefined;
     // Get all descendants of the unit we're moving
@@ -236,8 +247,12 @@ hierarchicalChangeTestData.forEach((testData) => {
       // SOURCE HIERARCHY: Expand up to and INCLUDING the old parent
       await hierarchyPage.expandHierarchyPath(originalHierarchy, oldParentUnit);
       
-      // Unlock the old parent if needed
-      await hierarchyPage.unlockParentUnit(oldParentUnit);
+      // Unlock the old parent via API if needed
+      try {
+        await lockUnitStatus(request, [oldParentUnit], 1, 0);
+      } catch (error) {
+        console.log(`  ⚠ Could not unlock via API: ${error}`);
+      }
 
       // Collapse the old hierarchy by clicking the highest parent
       await hierarchyPage.collapseHierarchyPath(originalHierarchy);
@@ -245,8 +260,12 @@ hierarchicalChangeTestData.forEach((testData) => {
       // TARGET HIERARCHY: Expand up to and INCLUDING the new parent
       await hierarchyPage.expandHierarchyPath(newHierarchy, newParentUnit);
 
-      // Unlock the new parent if needed
-      await hierarchyPage.unlockParentUnit(newParentUnit);
+      // Unlock the new parent via API if needed
+      try {
+        await lockUnitStatus(request, [newParentUnit], 1, 0);
+      } catch (error) {
+        console.log(`  ⚠ Could not unlock via API: ${error}`);
+      }
 
       // UNIT RELOCATION: Select and move the unit to new parent's combobox
       const comboboxInput = hierarchyPage.page.locator(`[data-testid="unit-hierarchy-node-combobox-${newParentUnit}-input"]`);
@@ -298,10 +317,10 @@ hierarchicalChangeTestData.forEach((testData) => {
 
   // ============ TEST 3: Aggregation Verification in Old Hierarchy After Unit Removal ============
   hierarchicalChangeTestData.forEach((testData) => {
-    test(`test_hierarchicalChangeOldHierarchyAggregation[${testData.description}]`, async ({ hierarchyPage }) => {
+    test(`test_hierarchicalChangeOldHierarchyAggregation[${testData.description}]`, async ({ hierarchyPage, request }) => {
       test.setTimeout(120000);
 
-      const { materialId: makatId, originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, unitHierarchy } = testData;
+      const { materialId: makatId, unitsToExpand: originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, unitHierarchy } = testData;
       // Convert unit hierarchy object to Map for easier access
       const unitHierarchyMap = unitHierarchy ? new Map(Object.entries(unitHierarchy).map(([k, v]) => [parseInt(k), v])) : undefined;
 
@@ -334,8 +353,12 @@ hierarchicalChangeTestData.forEach((testData) => {
         // SOURCE HIERARCHY: Expand up to and INCLUDING the old parent
         await hierarchyPage.expandHierarchyPath(originalHierarchy, oldParentUnit);
         
-        // Unlock the old parent if needed
-        await hierarchyPage.unlockParentUnit(oldParentUnit);
+        // Unlock the old parent via API if needed
+        try {
+          await lockUnitStatus(request, [oldParentUnit], 1, 0);
+        } catch (error) {
+          console.log(`  ⚠ Could not unlock via API: ${error}`);
+        }
 
         // Collapse the old hierarchy by clicking the highest parent
         await hierarchyPage.collapseHierarchyPath(originalHierarchy);
@@ -343,8 +366,12 @@ hierarchicalChangeTestData.forEach((testData) => {
         // TARGET HIERARCHY: Expand up to and INCLUDING the new parent
         await hierarchyPage.expandHierarchyPath(newHierarchy, newParentUnit);
 
-        // Unlock the new parent if needed
-        await hierarchyPage.unlockParentUnit(newParentUnit);
+        // Unlock the new parent via API if needed
+        try {
+          await lockUnitStatus(request, [newParentUnit], 1, 0);
+        } catch (error) {
+          console.log(`  ⚠ Could not unlock via API: ${error}`);
+        }
 
         // UNIT RELOCATION: Select and move the unit to new parent's combobox
         const comboboxInput = hierarchyPage.page.locator(`[data-testid="unit-hierarchy-node-combobox-${newParentUnit}-input"]`);

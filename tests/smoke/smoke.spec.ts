@@ -1,9 +1,7 @@
 import { test, expect } from '../../src/fixtures';
-import { 
-  makatValidationTestData, 
-  hierarchyExpansionTestData, 
-  leafCellClickabilityTestData 
-} from '../../src/testData/smokeData';
+import smokeData from '../../src/testData/smokeData.json';
+
+const { makatValidationTestData, hierarchyExpansionTestData, leafCellClickabilityTestData } = smokeData;
 
 /**
  * E2E Smoke Tests for Hierarchy Module
