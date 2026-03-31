@@ -3,31 +3,43 @@
     {
       "materialId": "000000001",
       "description": "Hierarchical Aggregation Test - Matkal Level",
-      "unitsToExpand": [2, 11, 101],
-      "unitHierarchy": {
-        "2": [11],
-        "11": [101],
-        "101": [401, 701]
-      }
+      "unitsToExpand": [2, 11, 101]
     }
   ],
-  "hierarchicalChangeTestData": [
+  "test_hierarchicalChangeValuePreservation": [
     {
       "materialId": "000000001",
-      "description": "Hierarchical Change Test - Move Unit 12 from Parent 2 to Parent 3",
+      "description": "Value Preservation - Move Unit 101 from Parent 11 to Parent 12",
+      "hatunit": 1,
       "unitsToExpand": [2, 11, 101],
-      "newHierarchy": [3, 12, 102],
-      "unitToMove": 102,
+      "newHierarchy": [3, 12, 101],
+      "unitToMove": 101,
       "newParentUnit": 12,
-      "oldParentUnit": 11,
-      "unitHierarchy": {
-        "2": [11],
-        "3": [12],
-        "11": [101],
-        "12": [102],
-        "101": [401, 701],
-        "102": [402, 702]
-      }
+      "oldParentUnit": 11
+    }
+  ],
+  "test_hierarchicalChangeAggregation": [
+    {
+      "materialId": "000000001",
+      "description": "Aggregation Verification - Move Unit 101 from Parent 11 to Parent 12",
+      "hatunit": 1,
+      "unitsToExpand":  [3, 12, 101],
+      "newHierarchy": [2, 11, 101],
+      "unitToMove": 101,
+      "newParentUnit": 11,
+      "oldParentUnit": 12
+    }
+  ],
+  "test_hierarchicalChangeOldHierarchyAggregation": [
+    {
+      "materialId": "000000001",
+      "description": "Old Hierarchy Aggregation - Move Unit 101 from Parent 11 to Parent 12",
+      "hatunit": 1,
+      "unitsToExpand": [2, 11, 101],
+      "newHierarchy": [3, 12, 101],
+      "unitToMove": 101,
+      "newParentUnit": 12,
+      "oldParentUnit": 11
     }
   ]
 }

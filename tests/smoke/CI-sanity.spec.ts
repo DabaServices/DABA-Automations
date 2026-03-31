@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from '../../src/fixtures';
 
 // ============ Sanity Test: Always Passes ============
 test('sanity_alwaysPass @smoke', () => {

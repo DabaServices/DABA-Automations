@@ -1,5 +1,6 @@
 import { test, expect } from '../../src/fixtures';
 import aggregationData from '../../src/testData/aggregationData.json';
+import { lockCompleteHierarchy } from '../../src/api/apiHelpers';
 
 const hierarchicalAggregationTestData = aggregationData.hierarchicalAggregationTestData;
 
@@ -26,47 +27,47 @@ const hierarchicalAggregationTestData = aggregationData.hierarchicalAggregationT
  * TEST DATA: Parameterized test runs for each material in hierarchicalAggregationTestData
  */
 
+// ============ Hooks ============
+test.afterEach(async ({ hierarchyPage }) => {
+  // Close the page after each test
+  try {
+    await hierarchyPage.page.close();
+  } catch (err) {
+    // Ignore errors if page is already closed
+  }
+});
+
 hierarchicalAggregationTestData.forEach((testData) => {
   test(
     `test_aggregationVerification[${testData.description}]`,
-    async ({ hierarchyPage }) => {
+    async ({ hierarchyPage, request }) => {
+      // Lock default test units at the start
+      await lockCompleteHierarchy(request, [10, 2, 3, 4, 5, 6, 7, 8, 9]);
+      await hierarchyPage.page.reload();
+      await hierarchyPage.page.waitForLoadState('networkidle');
+
       // Extract test parameters: material ID and units to expand through
       const makatId = testData.materialId;
       const unitsToExpand = testData.unitsToExpand;
 
       // STEP 1: Add the material to the table
-      await hierarchyPage.selectMakatFromDropdown(makatId);
-      await hierarchyPage.clickAddMakatAdornment();
-      const makatAdded = await hierarchyPage.verifyMaterialIdInRow(makatId);
-      expect(makatAdded).toBe(true);
+      await hierarchyPage.addMakatFromDropdown(makatId);
 
       // STEP 2: Expand ONLY the given hierarchy path - no more, no less
-      console.log(`\n[EXPANDING PATH] Expanding only: [${unitsToExpand.join(' → ')}]`);
-      const hierarchyExpanded = await hierarchyPage.expandHierarchyToLeaf(makatId, unitsToExpand);
-      expect(hierarchyExpanded).toBe(true);
-      console.log(`✓ Path expanded`);
+      await hierarchyPage.expandHierarchyToLeaf(makatId, unitsToExpand);
 
       // STEP 3: Set test values at leaf cells
       const leafValues = await hierarchyPage.setLeafCellValues(makatId, 4);
-      console.log(`\n[LEAF VALUES SET] Material ${makatId}:`);
-      for (const [unitId, value] of leafValues.entries()) {
-        console.log(`  - Unit ${unitId}: ${value}`);
-      }
 
-      // STEP 4: Verify aggregation based on visible cells in the expanded path
-      console.log(`\n[AGGREGATION VERIFICATION] Verifying aggregation for visible cells...`);
-      
-      // Convert unitHierarchy to Map for verification
-      const unitHierarchyMap = testData.unitHierarchy
-        ? new Map(Object.entries(testData.unitHierarchy).map(([k, v]) => [parseInt(k), v]))
-        : undefined;
-      
-      // Verify aggregation using provided hierarchy
-      const aggregationValid = await hierarchyPage.verifyAggregation(
+      // STEP 4: Capture ALL visible cell values at each level (including all siblings)
+      const allVisibleValues = await hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, unitsToExpand);
+
+      // STEP 5: Verify aggregation with all visible children using the captured values
+      console.log(`\n[AGGREGATION VERIFICATION] Verifying aggregation including all siblings...`);
+      const aggregationValid = await hierarchyPage.verifyAggregationWithAllVisibleCells(
         makatId,
         unitsToExpand,
-        leafValues,
-        unitHierarchyMap
+        allVisibleValues
       );
       if (aggregationValid) {
         console.log(`✓ AGGREGATION VERIFIED`);

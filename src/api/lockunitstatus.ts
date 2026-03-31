@@ -1,4 +1,4 @@
-import { APIRequestContext } from '@playwright/test';
+import { APIRequestContext, Page } from '@playwright/test';
 
 /**
  * Lock/Unlock Unit Status API
@@ -7,7 +7,7 @@ import { APIRequestContext } from '@playwright/test';
  * Takes unit number, parent unit number, lock status (0=unlock, 1=lock), and optional date.
  */
 
-const API_BASE_URL = 'http://162.55.55.124:3000';
+const API_BASE_URL = 'http://localhost:3000';
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -22,53 +22,58 @@ const getTodayDate = (): string => {
  * 
  * @param request - Playwright APIRequestContext for making HTTP calls
  * @param unitIds - Array of unit IDs to update (can be single unit or multiple units)
- * @param fatherNumber - The parent unit ID (context for the operation)
+ * @param requestingUnitId - The unit ID that is performing the request (used in headers)
  * @param lockStatus - 0 to unlock, 1 to lock the units
  * @param screenDate - Date string in format 'YYYY-MM-DD' (optional, defaults to today)
+ * @param page - Playwright Page object (optional). If provided, page will be reloaded after API call
  * @returns API response from the server
  * 
  * @example
- * // Unlock single unit 52 with parent 2 (today's date)
- * await lockUnitStatus(request, [52], 2, 0);
+ * // Unlock single unit 52 as unit 1 (today's date)
+ * await lockUnitStatus(request, [52], 1, 0);
  * 
  * // Unlock multiple units on a specific date
  * await lockUnitStatus(request, [10, 2, 3, 4, 5], 1, 0, '2026-03-25');
  * 
  * // Lock multiple units
  * await lockUnitStatus(request, [10, 2, 3], 1, 1);
+ * 
+ * // Lock units and refresh page
+ * await lockUnitStatus(request, [10, 2, 3], 1, 1, undefined, page);
  */
 export async function lockUnitStatus(
   request: APIRequestContext,
   unitIds: number[],
-  fatherNumber: number,
+  requestingUnitId: number,
   lockStatus: 0 | 1,
-  screenDate?: string
+  screenDate?: string,
+  page?: Page
 ): Promise<any> {
   const url = `${API_BASE_URL}/statuses`;
   
   // Use today's date if not provided
   const currentDate = screenDate || getTodayDate();
   
+  // CRITICAL: updateHierarchy logic:
+  // - lockStatus 0 (UNLOCK): updateHierarchy = false (don't recalculate when unlocking)
+  // - lockStatus 1 (LOCK): updateHierarchy = true (recalculate aggregation when locking)
+  const updateHierarchy = lockStatus === 1;
+  
   const payload = {
     unitsIds: unitIds,
     statusId: lockStatus,
-    updateHierarchy: false
+    updateHierarchy: updateHierarchy
   };
 
   const headers = {
     'Content-Type': 'application/json',
     'authorization': 'Bearer',
-    'unit': fatherNumber.toString(),
+    'unit': requestingUnitId.toString(),
     'screendate': currentDate
   };
 
   const statusText = lockStatus === 1 ? 'LOCK' : 'UNLOCK';
-  console.log(`\n[LOCK UNIT STATUS API]`);
-  console.log(`  POST ${url}`);
-  console.log(`  Units: [${unitIds.join(', ')}]`);
-  console.log(`  Parent: ${fatherNumber}`);
-  console.log(`  Action: ${statusText}`);
-  console.log(`  Date: ${currentDate}`);
+  const action = lockStatus === 1 ? 'Locking' : 'Unlocking';
 
   const response = await request.post(url, { data: payload, headers });
 
@@ -79,15 +84,17 @@ export async function lockUnitStatus(
   } catch {
     responseBody = await response.text();
   }
-
-  console.log(`  Response Status: ${status}`);
   
   if (status !== 201) {
-    const errorMsg = `Failed to ${statusText} units [${unitIds.join(', ')}]. Status: ${status}, Body: ${JSON.stringify(responseBody)}`;
-    console.error(`  ✗ ${errorMsg}`);
+    const errorMsg = `Failed to ${statusText} units [${unitIds.join(', ')}]. Status: ${status}`;
+    console.error(`[lockUnitStatus] ${errorMsg}`);
     throw new Error(errorMsg);
   }
-
-  console.log(`  ✓ Units [${unitIds.join(', ')}] ${statusText} successful`);
+  
+  // Refresh page if provided to ensure UI reflects the lock/unlock status change
+  if (page) {
+    await page.reload();
+  }
+  
   return responseBody;
 }
