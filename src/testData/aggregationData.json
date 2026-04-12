@@ -9,37 +9,37 @@
   "test_hierarchicalChangeValuePreservation": [
     {
       "materialId": "000000001",
-      "description": "Value Preservation - Move Unit 101 from Parent 11 to Parent 12",
+      "description": "Value Preservation - Move Unit 401 from Parent 101 to Parent 3",
       "hatunit": 1,
-      "unitsToExpand": [2, 11, 101],
-      "newHierarchy": [3, 12, 101],
-      "unitToMove": 101,
-      "newParentUnit": 12,
-      "oldParentUnit": 11
+      "unitsToExpand": [2, 11, 101, 401],
+      "newHierarchy": [3, 401],
+      "unitToMove": 401,
+      "newParentUnit": 3,
+      "oldParentUnit": 101
     }
   ],
   "test_hierarchicalChangeAggregation": [
     {
       "materialId": "000000001",
-      "description": "Aggregation Verification - Move Unit 101 from Parent 11 to Parent 12",
+      "description": "Aggregation Verification - Move Unit 401 from Parent 3 back to Parent 101",
       "hatunit": 1,
-      "unitsToExpand":  [3, 12, 101],
-      "newHierarchy": [2, 11, 101],
-      "unitToMove": 101,
-      "newParentUnit": 11,
-      "oldParentUnit": 12
+      "unitsToExpand": [3, 401],
+      "newHierarchy": [2, 11, 101, 401],
+      "unitToMove": 401,
+      "newParentUnit": 101,
+      "oldParentUnit": 3
     }
   ],
   "test_hierarchicalChangeOldHierarchyAggregation": [
     {
       "materialId": "000000001",
-      "description": "Old Hierarchy Aggregation - Move Unit 101 from Parent 11 to Parent 12",
+      "description": "Old Hierarchy Aggregation - Move Unit 401 from Parent 101 to Parent 3",
       "hatunit": 1,
-      "unitsToExpand": [2, 11, 101],
-      "newHierarchy": [3, 12, 101],
-      "unitToMove": 101,
-      "newParentUnit": 12,
-      "oldParentUnit": 11
+      "unitsToExpand": [2, 11, 101, 401],
+      "newHierarchy": [3, 401],
+      "unitToMove": 401,
+      "newParentUnit": 3,
+      "oldParentUnit": 101
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { APIRequestContext, Page } from '@playwright/test';
+import { APIRequestContext } from '@playwright/test';
 
 /**
  * Hierarchy Change API
@@ -7,7 +7,7 @@ import { APIRequestContext, Page } from '@playwright/test';
  * Moves a unit from one parent to another in the hierarchy tree.
  */
 
-const API_BASE_URL = 'http://localhost:3000';
+const API_BASE_URL = 'http://162.55.55.124:3000'; //http://localhost:3000
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -26,7 +26,6 @@ const getTodayDate = (): string => {
  * @param rootUnit - The root unit ID (usually 1)
  * @param requestingUnitId - The unit ID that is performing the request (used in headers)
  * @param screenDate - Date string in format 'YYYY-MM-DD' (optional, defaults to today)
- * @param page - Playwright Page object (optional). If provided, page will be reloaded after API call
  * @returns API response from the server
  * 
  * @example
@@ -35,9 +34,6 @@ const getTodayDate = (): string => {
  * 
  * // Move unit 12 to parent 11 as unit 2 on a specific date
  * await updateUnitHierarchy(request, 12, 11, 1, 2, '2026-03-25');
- * 
- * // Move unit 12 to parent 11 AND refresh the page
- * await updateUnitHierarchy(request, 12, 11, 1, 1, undefined, page);
  */
 export async function updateUnitHierarchy(
   request: APIRequestContext,
@@ -45,8 +41,7 @@ export async function updateUnitHierarchy(
   upperUnit: number,
   rootUnit: number = 1,
   requestingUnitId?: number,
-  screenDate?: string,
-  page?: Page
+  screenDate?: string
 ): Promise<any> {
   const url = `${API_BASE_URL}/units/hierarchy`;
   
@@ -85,13 +80,6 @@ export async function updateUnitHierarchy(
     const errorMsg = `Failed to update hierarchy for unit ${lowerUnit}. Status: ${status}`;
     console.error(`[updateUnitHierarchy] ${errorMsg}`);
     throw new Error(errorMsg);
-  }
-
-  console.info(`[updateUnitHierarchy] Unit ${lowerUnit} successfully moved to parent ${upperUnit}`);
-  
-  // Refresh page if provided to ensure UI reflects the API change
-  if (page) {
-    await page.reload();
   }
   
   return responseBody;

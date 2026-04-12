@@ -16,7 +16,7 @@ export default defineConfig({
   // 3. הגדרות בסיסיות לכל בדיקה
   use: {
     // הכתובת של האתר שלך 
-    baseURL: 'http://localhost:5173/', // http://162.55.55.124/
+    baseURL: 'http://162.55.55.124/', // http://localhost:5173/ 
 
     // צילום מסך רק כשניסוי נכשל - חוסך מקום ומסדר את הדו"ח
     screenshot: 'only-on-failure',
@@ -27,7 +27,7 @@ export default defineConfig({
     headless: true,
 
     launchOptions: {
-      slowMo: 400,
+      slowMo: 300,
     },
   },
 

@@ -4,35 +4,17 @@ import {
   unlockCompleteHierarchy,
   lockCompleteHierarchy,
 } from '../../src/api/apiHelpers';
-import {
-  printUnitValues,
-} from '../../src/helpers/hierarchyHelpers';
 import { updateUnitHierarchy } from '../../src/api/hierarchychange';
 
 const test_hierarchicalChangeValuePreservationData = aggregationData.test_hierarchicalChangeValuePreservation;
 const test_hierarchicalChangeAggregationData = aggregationData.test_hierarchicalChangeAggregation;
 const test_hierarchicalChangeOldHierarchyAggregationData = aggregationData.test_hierarchicalChangeOldHierarchyAggregation;
 
-// ============ Hooks ============
-// test.afterEach(async ({ hierarchyPage }) => {
-//   // Close the page after each test
-//   try {
-//     await hierarchyPage.page.close();
-//   } catch (err) {
-//     // Ignore errors if page is already closed
-//   }
-// });
-
 //────────────────────────TEST 1────────────────────────────────────
 // hierarchy change using UI
 test_hierarchicalChangeValuePreservationData.forEach((testData) => {
   test(`test_hierarchicalChangeValuePreservation[${testData.description}]`, async ({ hierarchyPage, request }) => {
     test.setTimeout(120000);
-
-    // Lock default test units at the start
-    await lockCompleteHierarchy(request, [10, 2, 3, 4, 5, 6, 7, 8, 9]);
-    await hierarchyPage.page.reload();
-    await hierarchyPage.page.waitForLoadState('networkidle');
 
     const { materialId: makatId, unitsToExpand: originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, hatunit } = testData;
 
@@ -43,7 +25,7 @@ test_hierarchicalChangeValuePreservationData.forEach((testData) => {
     await hierarchyPage.expandHierarchyToLeaf(makatId, originalHierarchy);
     
     // STEP 2: Set values and capture BEFORE move
-    const leafValues = await hierarchyPage.setLeafCellValues(makatId, 1);
+    const leafValues = await hierarchyPage.setLeafCellValues(makatId, originalHierarchy, 1);
     
     // Capture the current values before we move the unit
     const valuesBefore = await hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, originalHierarchy);
@@ -113,11 +95,6 @@ test_hierarchicalChangeAggregationData.forEach((testData) => {
   test(`test_hierarchicalChangeAggregation[${testData.description}]`, async ({ hierarchyPage, request }) => {
     test.setTimeout(120000);
 
-    // Lock default test units at the start
-    await lockCompleteHierarchy(request, [10, 2, 3, 4, 5, 6, 7, 8, 9]);
-    await hierarchyPage.page.reload();
-    await hierarchyPage.page.waitForLoadState('networkidle');
-
     const { materialId: makatId, unitsToExpand: originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, hatunit } = testData;
 
     // STEP 1: Add material and expand
@@ -127,7 +104,7 @@ test_hierarchicalChangeAggregationData.forEach((testData) => {
     await hierarchyPage.expandHierarchyToLeaf(makatId, originalHierarchy);
     
     // STEP 2: Set values
-    await hierarchyPage.setLeafCellValues(makatId, 1);
+    await hierarchyPage.setLeafCellValues(makatId, originalHierarchy, 1);
     
     // STEP 3: Save material
     await hierarchyPage.saveMaterial();
@@ -179,11 +156,6 @@ test_hierarchicalChangeOldHierarchyAggregationData.forEach((testData) => {
   test(`test_hierarchicalChangeOldHierarchyAggregation[${testData.description}]`, async ({ hierarchyPage, request }) => {
     test.setTimeout(120000);
 
-    // Lock default test units at the start
-    await lockCompleteHierarchy(request, [10, 2, 3, 4, 5, 6, 7, 8, 9]);
-    await hierarchyPage.page.reload();
-    await hierarchyPage.page.waitForLoadState('networkidle');
-
     const { materialId: makatId, unitsToExpand: originalHierarchy, newHierarchy, unitToMove, newParentUnit, oldParentUnit, hatunit } = testData;
 
     // STEP 1: Add material and expand
@@ -193,7 +165,7 @@ test_hierarchicalChangeOldHierarchyAggregationData.forEach((testData) => {
     await hierarchyPage.expandHierarchyToLeaf(makatId, originalHierarchy);
     
     // STEP 2: Set values
-    await hierarchyPage.setLeafCellValues(makatId, 1);
+    await hierarchyPage.setLeafCellValues(makatId, originalHierarchy, 1);
     
     // STEP 3: Save material
     await hierarchyPage.saveMaterial();
@@ -225,8 +197,22 @@ test_hierarchicalChangeOldHierarchyAggregationData.forEach((testData) => {
     // STEP 8: Capture ALL visible cell values at each level for old hierarchy path
     console.log(`\n[CAPTURING ALL VISIBLE CELLS] For old hierarchy after unit removal...`);
     const oldHierarchyValues = await hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, oldHierarchyPath);
+
+    // STEP 9: Verify moved unit is NO LONGER present in the old hierarchy
+    console.log(`\n[MOVED UNIT ABSENCE CHECK]`);
+    console.log(`────────────────────────────────────────────────────────────`);
+    if (oldHierarchyValues.has(unitToMove)) {
+      const staleValue = oldHierarchyValues.get(unitToMove);
+      console.error(`  ✗ Unit ${unitToMove} still appears in old hierarchy with value=${staleValue}`);
+      throw new Error(
+        `Unit ${unitToMove} was NOT removed from old hierarchy path [${oldHierarchyPath.join(' → ')}]. ` +
+        `It still appears with value=${staleValue}. The move operation may have failed.`
+      );
+    }
+    console.log(`  ✓ Unit ${unitToMove} is absent from old hierarchy – move confirmed`);
+    console.log(`────────────────────────────────────────────────────────────`);
     
-    // STEP 9: Verify aggregation of the old hierarchy with all visible children
+    // STEP 10: Verify aggregation of the old hierarchy with all visible children
     console.log(`\n[AGGREGATION VERIFICATION FOR OLD HIERARCHY]`);
     const oldHierarchyAggregationValid = await hierarchyPage.verifyAggregationWithAllVisibleCells(
       makatId,

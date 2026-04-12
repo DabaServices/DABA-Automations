@@ -162,14 +162,24 @@ export class mainPage {
    * Add a material from the dropdown in one operation
    * 
    * FLOW:
-   * 1. Select the material from the dropdown
-   * 2. Click the add button to add it to the table
+   * 1. Check if the material is already visible in the table
+   * 2. If found, skip adding (already added)
+   * 3. If not found, select the material from the dropdown and add it
    * 
    * @param materialIdOrText - The material ID to search for (e.g., 'm0000002')
    */
   async addMakatFromDropdown(materialIdOrText: string) {
-    console.info(`[addMakatFromDropdown] Adding material: ${materialIdOrText}`);
+    console.info(`[addMakatFromDropdown] Checking if material already exists: ${materialIdOrText}`);
     try {
+      // Step 0: Check if material is already in the table
+      const alreadyAdded = await this.verifyMaterialIdInRow(materialIdOrText);
+      if (alreadyAdded) {
+        console.info(`[addMakatFromDropdown] Material ${materialIdOrText} already exists in table, skipping add`);
+        return;
+      }
+      
+      console.info(`[addMakatFromDropdown] Material not found, adding: ${materialIdOrText}`);
+      
       // Step 1: Select from dropdown
       await this.selectMakatFromDropdown(materialIdOrText);
       
@@ -203,6 +213,58 @@ export class mainPage {
       }
     } catch (error) {
       console.error(`[saveMaterial] Failed to save material: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete a material (makat) from the table
+   * 
+   * FLOW:
+   * 1. Find the delete trigger icon for the material
+   * 2. Click the delete trigger icon to open the delete menu/dialog
+   * 3. Click the delete confirmation button
+   * 4. Wait for the deletion to process
+   * 
+   * @param materialId - The material ID to delete (e.g., '000000001')
+   * @returns Promise<boolean> - True if deletion was successful, false otherwise
+   */
+  async deleteMakat(materialId: string): Promise<boolean> {
+    console.info(`[deleteMakat] Attempting to delete material ${materialId}`);
+    try {
+      // Click the delete trigger icon
+      const deleteIcon = this.page.getByTestId(`row-delete-trigger-icon-${materialId}`);
+      
+      if (await deleteIcon.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await deleteIcon.click();
+        console.log(`[deleteMakat] Delete trigger icon clicked for material ${materialId}`);
+      } else {
+        console.warn(`[deleteMakat] Delete trigger icon not found for material ${materialId}`);
+        return false;
+      }
+
+      // Wait for the confirmation dialog/menu to appear
+      await this.page.waitForTimeout(300);
+
+      // Click the delete confirmation button
+      const deleteConfirmBtn = this.page.getByTestId(`row-delete-current-type-${materialId}`);
+      
+      if (await deleteConfirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await deleteConfirmBtn.click();
+        console.log(`[deleteMakat] Delete confirmation button clicked for material ${materialId}`);
+      } else {
+        console.warn(`[deleteMakat] Delete confirmation button not found for material ${materialId}`);
+        return false;
+      }
+
+      // Wait for the deletion to process
+      await this.page.waitForTimeout(500);
+      await this.waitForNetworkIdle();
+      
+      console.info(`[deleteMakat] Material ${materialId} deleted successfully`);
+      return true;
+    } catch (error) {
+      console.error(`[deleteMakat] Failed to delete material ${materialId}: ${error}`);
       throw error;
     }
   }
@@ -269,48 +331,7 @@ export class mainPage {
   }
 
 
-  /**
-   * Capture the current displayed value for each unit in a descendants list.
-   *
-   * Scans all numbered-cell inputs that belong to the given material and
-   * returns a map of unitId → value for every unit found in `descendants`.
-   *
-   * @param materialId  - The material/makat ID (e.g. '000000001')
-   * @param descendants - Array of unit IDs to collect values for
-   * @returns Map<unitId, value>
-   */
-  async captureUnitValues(
-    materialId: string,
-    descendants: number[]
-  ): Promise<Map<number, number>> {
-    const unitValuesMap = new Map<number, number>();
-    const inputElements = await this.page
-      .locator(`[data-testid*="${materialId}"] [data-testid*="input"]`)
-      .all();
 
-    for (const input of inputElements) {
-      try {
-        const testId = await input.locator('..').getAttribute('data-testid');
-        if (testId?.includes(`numbered-cell-${materialId}`)) {
-          // testId pattern: numbered-cell-<materialId>-<unitId>
-          const unitMatch = testId.match(/numbered-cell-[^-]+-(\d+)/);
-          if (unitMatch) {
-            const unitId = parseInt(unitMatch[1], 10);
-            if (descendants.includes(unitId)) {
-              const value = parseInt(
-                (await input.inputValue().catch(() => '0')) || '0',
-                10
-              );
-              unitValuesMap.set(unitId, value);
-            }
-          }
-        }
-      } catch {
-        // Skip cells that can't be read
-      }
-    }
-    return unitValuesMap;
-  }
 
   // ============ Data Validation ============
   // Purpose: Verify that materials were successfully added to the table
@@ -360,6 +381,15 @@ export class mainPage {
   /**
    * Step 2: Set values at changeable leaf cells (ZERO-CELLS AND INCREMENT GROUP CELLS)
    * 
+   * IMPORTANT: Only adds values to DIRECT CHILDREN of the LAST unit in unitsToExpand
+   * - If unitsToExpand is [2, 11, 101, 404], only cells that are direct children of 404 are processed
+   * - If unitsToExpand is [2, 11, 101], only cells that are direct children of 101 are processed
+   * - Does NOT add values to children of 2, 11, or any other ancestor units
+   * 
+   * HOW IT WORKS:
+   * - The cell's parent unit is encoded in the row structure (data-testid contains parent unit ID)
+   * - Only cells whose parent is the last unit in unitsToExpand are processed
+   * 
    * HANDLES TWO SCENARIOS:
    * 
    * SCENARIO A - INITIALIZE ZERO-CELLS:
@@ -370,36 +400,67 @@ export class mainPage {
    * - If no zero-cells found, look for existing numbered-cells (group cells with pre-set values)
    * - Increment these group cells by the specified incrementValue times
    * 
-   * COMPLETE WORKFLOW:
-   * 1. Find all zero-cells for this material
-   * 2. If zero-cells exist:
-   *    a. Click each zero-cell to convert it to a group cell with value 1
-   *    b. Wait for page to settle
-   *    c. Find all increment buttons for the newly created group cells
-   *    d. Click each increment button incrementValue times
-   * 3. If NO zero-cells exist:
-   *    a. Find all existing numbered-cells (group cells)
-   *    b. Click each increment button incrementValue times
-   * 4. Return map of units and their final set values
-   * 
    * @param materialId - The material ID (e.g., 'm0000001')
-   * @param incrementValue - Number of times to click increment button (e.g., 4 to reach 5 from 1, or 1 to increment by 1)
+   * @param unitsToExpand - Array of unit IDs in hierarchy path, LAST element is the parent unit
+   * @param incrementValue - Number of times to click increment button (e.g., 4 to reach 5 from 1)
    * @returns Promise<Map<string, number>> - Map of unitId to final set value
    */
   async setLeafCellValues(
     materialId: string,
+    unitsToExpand: number[],
     incrementValue: number = 4
   ): Promise<Map<string, number>> {
     const setLeafValues: Map<string, number> = new Map();
 
     try {
-      // ============ SCENARIO A: INITIALIZE ZERO-CELLS ============
-      // Zero-cells are empty leaf nodes that can be clicked to initialize
-      const zeroCells = this.page.locator(`[data-testid*="zero-cell-${materialId}-"]`);
-      const zeroCellCount = await zeroCells.count();
-      let clickedZeroCells = false; // Track if we clicked any zero-cells
+      // Determine which unit is the parent of the cells we want to modify
+      // Strategy: Try the last unit first (it might have children)
+      // If no children found, fall back to second-to-last unit
+      let parentUnitId = unitsToExpand[unitsToExpand.length - 1];
+      const leafUnitId = parentUnitId;
+      
+      console.log(`[setLeafCellValues] Full hierarchy path: ${unitsToExpand.join(' -> ')}`);
+      console.log(`[setLeafCellValues] Trying parent unit: ${parentUnitId}`);
 
-      // Store zero-cell test IDs before clicking them
+      // ============ FIND THE SUB-ROW CONTAINER ============
+      // Find the sub-row container that holds children cells of the parent unit
+      let subRow = this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`);
+      
+      // Try alternative selector if first doesn't work
+      if (!(await subRow.first().isVisible({ timeout: 500 }).catch(() => false))) {
+        subRow = this.page.locator(`[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`);
+      }
+
+      let isSubRowVisible = await subRow.first().isVisible({ timeout: 500 }).catch(() => false);
+      console.log(`[setLeafCellValues] Sub-row container for parent ${parentUnitId} visible: ${isSubRowVisible}`);
+
+      // If no sub-row found for the leaf unit, try the parent unit
+      if (!isSubRowVisible && unitsToExpand.length > 1) {
+        parentUnitId = unitsToExpand[unitsToExpand.length - 2];
+        console.log(`[setLeafCellValues] No children found under ${leafUnitId}, trying parent unit: ${parentUnitId}`);
+        
+        subRow = this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`);
+        if (!(await subRow.first().isVisible({ timeout: 500 }).catch(() => false))) {
+          subRow = this.page.locator(`[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`);
+        }
+        
+        isSubRowVisible = await subRow.first().isVisible({ timeout: 500 }).catch(() => false);
+        console.log(`[setLeafCellValues] Sub-row container for parent ${parentUnitId} visible: ${isSubRowVisible}`);
+      }
+
+      if (!isSubRowVisible) {
+        console.warn(`[setLeafCellValues] Sub-row container not found for parent unit ${parentUnitId}`);
+        return setLeafValues;
+      }
+
+      // ============ SCENARIO A: INITIALIZE ZERO-CELLS ============
+      // Find zero-cells that are DIRECT CHILDREN of the parent unit
+      const zeroCells = subRow.locator(`[data-testid*="zero-cell-${materialId}-"]`);
+      const zeroCellCount = await zeroCells.count();
+      let clickedZeroCells = false;
+
+      console.log(`[setLeafCellValues] Found ${zeroCellCount} zero-cells under parent ${parentUnitId}`);
+
       const zeroCellIds: string[] = [];
       if (zeroCellCount > 0) {
         for (let i = 0; i < zeroCellCount; i++) {
@@ -409,32 +470,42 @@ export class mainPage {
           }
         }
 
+        console.log(`[setLeafCellValues] Zero-cell IDs found: ${zeroCellIds.join(', ')}`);
+
         // Click each zero-cell to convert it to group cell (value 1)
         for (const testId of zeroCellIds) {
           try {
             const cell = this.page.locator(`[data-testid="${testId}"]`).first();
             const unitMatch = testId.match(/zero-cell-[^-]+-(\d+)/);
-            const unitId = unitMatch ? unitMatch[1] : 'unknown';
+            const childUnitId = unitMatch ? unitMatch[1] : 'unknown';
 
+            console.log(`[setLeafCellValues] Clicking zero-cell for child unit ${childUnitId} (child of ${parentUnitId})`);
             await cell.click();
-            setLeafValues.set(unitId, 1); // Initial value after click is 1
-            clickedZeroCells = true; // Mark that we clicked at least one zero-cell
+            setLeafValues.set(childUnitId, 1);
+            clickedZeroCells = true;
           } catch (error) {
             console.warn(`Failed to click zero-cell ${testId}:`, error);
             continue;
           }
         }
 
-        // Wait for page to settle after clicking zero-cells (with timeout)
-        await this.page.waitForLoadState('networkidle').catch(() => {
-          // Timeout is acceptable, continue anyway
-        });
+        // Wait for page to settle
+        await this.page.waitForLoadState('networkidle').catch(() => {});
+        
+        // Additional wait to ensure numbered cells are rendered after zero-cell clicks
+        if (clickedZeroCells) {
+          console.log(`[setLeafCellValues] Waiting for numbered-cells to render after zero-cell clicks...`);
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
 
       // ============ SCENARIO B: FIND GROUP CELLS (EXISTING OR NEWLY CREATED) ============
-      // If we just created group cells from zero-cells, or if there are existing group cells
-      const numberedCells = this.page.locator(`[data-testid*="numbered-cell-${materialId}-"]`);
+      // Find numbered-cells that are DIRECT CHILDREN of the parent unit
+      // Look for all numbered-cell elements
+      const numberedCells = subRow.locator(`[data-testid*="numbered-cell"]`);
       const numberedCellCount = await numberedCells.count();
+
+      console.log(`[setLeafCellValues] Found ${numberedCellCount} numbered-cells under parent ${parentUnitId}`);
 
       if (numberedCellCount > 0 && incrementValue > 0) {
         // Extract unit IDs from numbered cells
@@ -442,33 +513,50 @@ export class mainPage {
         for (let i = 0; i < numberedCellCount; i++) {
           const testId = await numberedCells.nth(i).getAttribute('data-testid');
           if (testId && !testId.includes('increment') && !testId.includes('decrement')) {
-            const unitMatch = testId.match(/numbered-cell-[^-]+-(\d+)/);
+            // Extract unit ID from testId (format: numbered-cell-MATERIAL-UNIT-suffix)
+            const unitMatch = testId.match(/numbered-cell-\d+-(\d+)/);
             if (unitMatch) {
               const unitId = unitMatch[1];
               if (!unitIds.includes(unitId)) {
                 unitIds.push(unitId);
+                console.log(`[setLeafCellValues] Found numbered-cell with testId=${testId}, unitId=${unitId}`);
               }
+            } else {
+              console.log(`[setLeafCellValues] Could not extract unit ID from testId: ${testId}`);
             }
           }
         }
 
-        // ============ INCREMENT EACH GROUP CELL ============
-        // For each unit that has a numbered cell, find its increment button and click it
-        // NOTE: If we clicked zero-cells, adjust incrementValue by -1 because zero-cell click already set value to 1
+        console.log(`[setLeafCellValues] Unique child unit IDs with numbered-cells: ${unitIds.join(', ')}`);
+
         const adjustedIncrementValue = clickedZeroCells ? Math.max(0, incrementValue - 1) : incrementValue;
+
+        console.log(`[setLeafCellValues] Incrementing cells by ${adjustedIncrementValue} (adjusted from ${incrementValue})`);
 
         for (const unitId of unitIds) {
           try {
-            // Find the increment button for this unit
-            const incrementBtn = this.page.locator(
-              `[data-testid*="numbered-cell-${materialId}-${unitId}-increment"]`
-            ).first();
+            // Find the numbered-cell container for this unit
+            const numberedCellContainer = subRow.locator(`[data-testid*="numbered-cell"][data-testid*="${unitId}"]`).first();
+            
+            const cellExists = await numberedCellContainer.isVisible({ timeout: 1000 }).catch(() => false);
+            if (!cellExists) {
+              console.log(`[setLeafCellValues] Could not find numbered-cell container for unit ${unitId}`);
+              continue;
+            }
+
+            // Find the increment button - it should be adjacent to or within the numbered-cell
+            let incrementBtn = numberedCellContainer.locator(`[data-testid*="increment"]`).first();
+            
+            // Try alternative selector if not found
+            if (!(await incrementBtn.isVisible({ timeout: 500 }).catch(() => false))) {
+              incrementBtn = this.page.locator(
+                `[data-testid*="numbered-cell"][data-testid*="${unitId}"] [data-testid*="increment"]`
+              ).first();
+            }
 
             if (await incrementBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
               // Get current value before incrementing
-              const inputField = this.page.locator(
-                `[data-testid*="numbered-cell-${materialId}-${unitId}"] [data-testid*="input"]`
-              ).first();
+              const inputField = numberedCellContainer.locator(`[data-testid*="input"]`).first();
               let currentValue = 0;
               try {
                 const inputValue = await inputField.inputValue().catch(() => '0');
@@ -477,14 +565,40 @@ export class mainPage {
                 currentValue = 0;
               }
 
+              console.log(`[setLeafCellValues] Unit ${unitId}: Current=${currentValue}, incrementing by ${adjustedIncrementValue}`);
+
               // Click increment button adjustedIncrementValue times
               for (let i = 0; i < adjustedIncrementValue; i++) {
                 await incrementBtn.click();
+                // Wait briefly between clicks to allow UI to update
+                await new Promise(resolve => setTimeout(resolve, 100));
               }
               
-              // Update or add the value in our map
-              const finalValue = currentValue + adjustedIncrementValue;
-              setLeafValues.set(unitId, finalValue);
+              // Wait for the input field to reflect the new value
+              const expectedFinalValue = currentValue + adjustedIncrementValue;
+              try {
+                await this.page.waitForFunction(() => {
+                  return inputField.inputValue().then(val => {
+                    return parseInt(val || '0', 10) === expectedFinalValue;
+                  });
+                }, { timeout: 2000 });
+              } catch {
+                console.warn(`[setLeafCellValues] Timeout waiting for unit ${unitId} value to update to ${expectedFinalValue}`);
+              }
+              
+              // Read the actual final value from the input field
+              let actualFinalValue = expectedFinalValue;
+              try {
+                const actualInputValue = await inputField.inputValue().catch(() => '0');
+                actualFinalValue = parseInt(actualInputValue || '0', 10);
+              } catch {
+                actualFinalValue = expectedFinalValue;
+              }
+              
+              setLeafValues.set(unitId, actualFinalValue);
+              console.log(`[setLeafCellValues] Unit ${unitId}: Final value = ${actualFinalValue}`);
+            } else {
+              console.warn(`[setLeafCellValues] Increment button not visible for unit ${unitId}`);
             }
           } catch (error) {
             console.warn(`Failed to increment cell for unit ${unitId}:`, error);
@@ -493,11 +607,10 @@ export class mainPage {
         }
       }
 
-      // Wait for page to settle after all increments (with timeout)
-      await this.page.waitForLoadState('networkidle').catch(() => {
-        // Timeout is acceptable, continue anyway
-      });
+      // Wait for page to settle
+      await this.page.waitForLoadState('networkidle').catch(() => {});
 
+      console.log(`[setLeafCellValues] Completed. Set values for ${setLeafValues.size} cells: ${Array.from(setLeafValues.entries()).map(([id, val]) => `${id}=${val}`).join(', ')}`);
       return setLeafValues;
     } catch (error) {
       console.error(`Failed to set leaf cell values:`, error);
@@ -505,302 +618,6 @@ export class mainPage {
     }
   }
 
-  /**
-   * Verify hierarchical aggregation logic
-   * 
-   * AGGREGATION RULE: Parent cell value = SUM(all child cell values)
-   * 
-   * FLOW:
-   * 1. Wait for page to settle and aggregation calculations to complete
-   * 2. Read all cell values (both zero-cells and numbered-cells)
-   * 3. Extract unit IDs and values from test IDs
-   * 4. For parent-child relationship, verify:
-   *    - Parent value = Sum of all child values
-   * 5. Log verification results for debugging
-   * 6. Return true if aggregation is correct
-   * 
-   * @param materialId - The material ID (e.g., 'm0000001')
-   * @param unitsToExpand - Array of unit IDs in hierarchy order (e.g., [2, 12, 52])
-   * @param setLeafValues - Map of leaf unit IDs and their values (e.g., {52: 3, 53: 2})
-   * @param unitHierarchy - Optional pre-defined hierarchy. If not provided, builds dynamically from DOM
-   * @returns Promise<boolean> - True if aggregation is correct
-   */
-  async verifyAggregation(
-    materialId: string,
-    unitsToExpand: number[],
-    setLeafValues: Map<string, number>,
-    unitHierarchy?: Map<number, number[]>
-  ): Promise<boolean> {
-    try {
-      // Wait for aggregation to compute
-      await this.waitForNetworkIdle();
-
-      // Use optimized approach - get all input values at once
-      const inputLocator = this.page.locator(`[data-testid*="${materialId}"] [data-testid*="input"]`);
-      const inputElements = await inputLocator.all();
-
-      const cellValues: Map<string, number> = new Map();
-
-      // Process all inputs in parallel for better performance
-      const valuePromises = inputElements.map(async (input, index) => {
-        try {
-          const testId = await input.locator('..').getAttribute('data-testid');
-          if (testId && !testId.includes('increment') && !testId.includes('decrement')) {
-            const value = await input.inputValue().catch(() => '0');
-            const numValue = parseInt(value || '0', 10);
-
-            if (!isNaN(numValue)) {
-              // Extract unit ID from testid
-              const unitMatch = testId.match(/(?:zero-cell|numbered-cell)-[^-]+-(\d+)/);
-              if (unitMatch) {
-                const unitId = unitMatch[1];
-                return { unitId, value: numValue };
-              }
-            }
-          }
-        } catch (err) {
-          console.warn(`Failed to read input ${index}:`, err);
-        }
-        return null;
-      });
-
-      const results = await Promise.all(valuePromises);
-
-      // Collect results
-      for (const result of results) {
-        if (result) {
-          const { unitId, value } = result;
-          // Store the maximum value (in case there are duplicates like root and group)
-          const existingValue = cellValues.get(unitId) || 0;
-          if (value > existingValue) {
-            cellValues.set(unitId, value);
-          }
-        }
-      }
-
-      // If hierarchy not provided, throw an error
-      if (!unitHierarchy) {
-        const errorMsg = `No unitHierarchy provided for material ${materialId}`;
-        console.error(`[verifyAggregation] ${errorMsg}`);
-        throw new Error(errorMsg);
-      }
-
-      // Log captured values only in debug mode (commented out for production)
-      // console.debug(`[verifyAggregation] Material ${materialId} - Captured ${cellValues.size} unit values`);
-
-      // For each level, find all units and sum their values
-      const levelSums: Map<number, { units: Map<string, number>, total: number }> = new Map();
-      
-      cellValues.forEach((value, unitId) => {
-        // Determine which level this unit belongs to
-        for (let level = 0; level < unitsToExpand.length; level++) {
-          const levelUnitId = unitsToExpand[level].toString();
-          if (unitId === levelUnitId) {
-            if (!levelSums.has(level)) {
-              levelSums.set(level, { units: new Map(), total: 0 });
-            }
-            const levelData = levelSums.get(level)!;
-            levelData.units.set(unitId, value);
-            levelData.total += value;
-            break;
-          }
-        }
-      });
-
-      // Verify parent-child aggregation using row sums
-      if (unitsToExpand.length >= 2) {
-        // Get the parent level unit
-        const parentLevelIdx = unitsToExpand.length - 2;
-        const parentLevelUnitId = unitsToExpand[parentLevelIdx].toString();
-        const parentLevelValue = cellValues.get(parentLevelUnitId) || 0;
-        
-        // Recursive function to sum all descendants (children and their descendants, not the unit itself)
-        const sumAllDescendants = (unitId: number): number => {
-          let total = 0;
-          
-          // If this unit has children, add their values recursively
-          if (unitHierarchy && unitHierarchy.has(unitId)) {
-            const children = unitHierarchy.get(unitId) || [];
-            for (const childId of children) {
-              // Add the direct child's value
-              const childValue = cellValues.get(childId.toString()) || 0;
-              total += childValue;
-              
-              // Recursively add all descendants of this child
-              total += sumAllDescendants(childId);
-            }
-          }
-          
-          return total;
-        };
-
-        let childrenSum = 0;
-        const childrenDetails: Array<{ unitId: string, value: number }> = [];
-        const allDescendantsDetails: Array<{ unitId: string, value: number }> = [];
-        
-        if (unitHierarchy) {
-          // Use hierarchy to find all direct children of the parent
-          const parentChildren = unitHierarchy.get(parseInt(parentLevelUnitId, 10)) || [];
-          for (const childId of parentChildren) {
-            // Get direct child value
-            const childValue = cellValues.get(childId.toString()) || 0;
-            childrenDetails.push({ unitId: childId.toString(), value: childValue });
-            childrenSum += childValue;
-            
-            // Also add the descendant sum for logging purposes
-            const descendantSum = sumAllDescendants(childId);
-            allDescendantsDetails.push({ unitId: childId.toString(), value: childValue + descendantSum });
-          }
-        } else {
-          // Fallback: sum all leaf values that were set
-          for (const [unitId, value] of setLeafValues.entries()) {
-            childrenSum += value;
-            childrenDetails.push({ unitId, value });
-          }
-        }
-
-        // Verify: Parent value should equal the sum of all descendants
-        const isAggregationValid = parentLevelValue === childrenSum;
-        if (isAggregationValid) {
-          console.info(`[verifyAggregationWithAllVisibleCells] Material ${materialId}: Aggregation VERIFIED (Parent ${parentLevelUnitId}=${parentLevelValue} = Sum=${childrenSum})`);
-        } else {
-          console.error(`[verifyAggregationWithAllVisibleCells] Material ${materialId}: Aggregation FAILED (Parent ${parentLevelUnitId}=${parentLevelValue} ≠ Sum=${childrenSum})`);
-        }
-        
-        let parentAggregationValid = isAggregationValid;
-
-        // Validate path levels
-        let hierarchyPathValid = true;
-        
-        for (let level = 0; level < unitsToExpand.length - 1; level++) {
-          const parentUnitId = unitsToExpand[level];
-          const parentValue = cellValues.get(parentUnitId.toString()) || 0;
-          
-          const allChildren = unitHierarchy ? (unitHierarchy.get(parentUnitId) || []) : [];
-          let totalChildrenSum = 0;
-          
-          for (const child of allChildren) {
-            if (cellValues.has(child.toString())) {
-              totalChildrenSum += (cellValues.get(child.toString()) || 0);
-            }
-          }
-          
-          const hasAllChildrenVisible = allChildren.length > 0 && totalChildrenSum > 0;
-          if (hasAllChildrenVisible && parentValue !== totalChildrenSum) {
-            console.error(`[verifyAggregationWithAllVisibleCells] Level ${level}: Unit ${parentUnitId} has aggregation mismatch (${parentValue} ≠ ${totalChildrenSum})`);
-            hierarchyPathValid = false;
-          }
-        }
-        
-        if (parentAggregationValid && hierarchyPathValid) {
-          return true;
-        } else {
-          return false;
-        }
-      }
-
-      return true;
-    } catch (error) {
-      console.error(`[verifyAggregationWithAllVisibleCells] Error: ${error}`);
-      throw error;
-    }
-  }
-
-  /**
-   * Get current hierarchy from the Unit Hierarchy Drawer
-   * 
-   * @returns Promise<Record<number, number[]>> - Map of parent ID to array of child IDs
-   */
-  async getCurrentHierarchyFromDrawer(): Promise<Record<number, number[]>> {
-    try {
-      const hierarchy: Record<number, number[]> = {};
-
-      // Query all parent units in the drawer
-      const parentRows = await this.page.locator('[data-testid*="hierarchy-parent"]').all();
-
-      for (const parentRow of parentRows) {
-        // Extract parent ID from data-testid (e.g., "hierarchy-parent-2")
-        const parentTestId = await parentRow.getAttribute('data-testid');
-        const parentIdMatch = parentTestId?.match(/hierarchy-parent-(\d+)/);
-        
-        if (!parentIdMatch) continue;
-        
-        const parentId = parseInt(parentIdMatch[1], 10);
-        
-        // Find all child rows under this parent
-        // This assumes a tree structure where children are nested under parent
-        const childRows = await parentRow.locator('+ [data-testid*="hierarchy-child"]').all();
-        const children: number[] = [];
-
-        for (const childRow of childRows) {
-          const childTestId = await childRow.getAttribute('data-testid');
-          const childIdMatch = childTestId?.match(/hierarchy-child-(\d+)/);
-          
-          if (childIdMatch) {
-            children.push(parseInt(childIdMatch[1], 10));
-          }
-        }
-
-        hierarchy[parentId] = children;
-      }
-
-      return hierarchy;
-    } catch (error) {
-      console.error('Error getting current hierarchy from drawer:', error);
-      return {};
-    }
-  }
-
-
-  /**
-   * Expand hierarchy path by clicking expand tooltips for each unit
-   * Expands up to and including the specified parent unit (does NOT expand beyond it)
-   * 
-   * EXAMPLE: For path [2, 12, 52] with parent 12:
-   * - Expands: 2 and 12
-   * - Does NOT expand: 52
-   * 
-   * @param hierarchyPath - Array of unit IDs representing the full path
-   * @param parentUnit - The parent unit ID to expand up to (inclusive)
-   * @returns Promise<void>
-   */
-  async expandHierarchyPath(hierarchyPath: number[], parentUnit: number): Promise<void> {
-    try {
-      console.log(`Expanding hierarchy path: [${hierarchyPath.join(' → ')}] up to parent unit ${parentUnit}`);
-      
-      // Find the index of the parent unit in the hierarchy path
-      const parentIndex = hierarchyPath.indexOf(parentUnit);
-      
-      if (parentIndex === -1) {
-        console.error(`✗ Parent unit ${parentUnit} not found in hierarchy path [${hierarchyPath.join(', ')}]`);
-        return;
-      }
-      
-      // Expand all units up to and including the parent unit
-      // Loop from 0 to parentIndex (inclusive)
-      for (let i = 0; i <= parentIndex; i++) {
-        const currentUnit = hierarchyPath[i];
-        
-        // Click expand tooltip for each unit to reveal its children
-        const expandTooltip = this.page.locator(`[data-testid="unit-hierarchy-row-expand-tooltip-${currentUnit}-wrapper"]`);
-        const isVisible = await expandTooltip.isVisible({ timeout: 2000 }).catch(() => false);
-        
-        if (isVisible) {
-          await expandTooltip.click();
-          await this.page.waitForTimeout(200); // Small delay between clicks
-          console.log(`  ✓ Expanded unit ${currentUnit}`);
-        } else {
-          console.warn(`  ⚠ Expand tooltip not found for unit ${currentUnit}`);
-        }
-      }
-      
-      console.log(`✓ Hierarchy path expanded successfully up to parent unit ${parentUnit}`);
-    } catch (error) {
-      console.error(`Failed to expand hierarchy path:`, error);
-    }
-  }
-
- 
   /**
    * Move a unit to a new parent via the unit-hierarchy drawer UI.
    *
@@ -834,7 +651,19 @@ export class mainPage {
     await this.page.waitForTimeout(500);
 
     // Expand the new hierarchy path down to the new parent node
-    await this.expandHierarchyPath(newHierarchy, newParentId);
+    const parentIndex = newHierarchy.indexOf(newParentId);
+    if (parentIndex !== -1) {
+      for (let i = 0; i <= parentIndex; i++) {
+        const currentUnit = newHierarchy[i];
+        const expandTooltip = this.page.locator(`[data-testid="unit-hierarchy-row-expand-tooltip-${currentUnit}-wrapper"]`);
+        const isVisible = await expandTooltip.isVisible({ timeout: 2000 }).catch(() => false);
+        
+        if (isVisible) {
+          await expandTooltip.click();
+          await this.page.waitForTimeout(200);
+        }
+      }
+    }
 
     // Select the unit from the new parent's combobox
     const comboboxInput = this.page.locator(
@@ -843,6 +672,10 @@ export class mainPage {
     await comboboxInput.click();
     await this.waitForNetworkIdle();
 
+    // Type the unit ID to search for it in the dropdown
+    await comboboxInput.fill(unitId.toString());
+
+    // Select the unit from the filtered options
     const unitOption = this.page.locator(
       `[data-testid="unit-hierarchy-node-combobox-${newParentId}-item-${unitId}"]`
     );

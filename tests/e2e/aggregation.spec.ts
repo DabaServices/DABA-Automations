@@ -1,6 +1,5 @@
 import { test, expect } from '../../src/fixtures';
 import aggregationData from '../../src/testData/aggregationData.json';
-import { lockCompleteHierarchy } from '../../src/api/apiHelpers';
 
 const hierarchicalAggregationTestData = aggregationData.hierarchicalAggregationTestData;
 
@@ -40,13 +39,7 @@ test.afterEach(async ({ hierarchyPage }) => {
 hierarchicalAggregationTestData.forEach((testData) => {
   test(
     `test_aggregationVerification[${testData.description}]`,
-    async ({ hierarchyPage, request }) => {
-      // Lock default test units at the start
-      await lockCompleteHierarchy(request, [10, 2, 3, 4, 5, 6, 7, 8, 9]);
-      await hierarchyPage.page.reload();
-      await hierarchyPage.page.waitForLoadState('networkidle');
-
-      // Extract test parameters: material ID and units to expand through
+    async ({ hierarchyPage }) => {
       const makatId = testData.materialId;
       const unitsToExpand = testData.unitsToExpand;
 
@@ -57,7 +50,7 @@ hierarchicalAggregationTestData.forEach((testData) => {
       await hierarchyPage.expandHierarchyToLeaf(makatId, unitsToExpand);
 
       // STEP 3: Set test values at leaf cells
-      const leafValues = await hierarchyPage.setLeafCellValues(makatId, 4);
+      const leafValues = await hierarchyPage.setLeafCellValues(makatId, unitsToExpand, 4);
 
       // STEP 4: Capture ALL visible cell values at each level (including all siblings)
       const allVisibleValues = await hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, unitsToExpand);

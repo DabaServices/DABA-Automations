@@ -9,81 +9,6 @@ import { lockUnitStatus } from './lockunitstatus';
  */
 
 /**
- * Unlock a complete hierarchy including all parents from root.
- *
- * This function unlocks all units needed for a move operation:
- * 1. The root parent (unit 1) if not already included
- * 2. All parents in the path up to the target unit
- * 3. All parent units in a second path if provided (for the old/new parent pairs)
- *
- * The API requires that a parent is unlocked before its children.
- * We always unlock top → bottom to satisfy this requirement.
- *
- * Example: If moving unit 101 from parent 11 to new parent 12:
- *   - Old path: [2, 11, 101]  →  unlock [1, 2, 11, 101]
- *   - New path: [3, 12, 101]  →  unlock [1, 3, 12, 101]
- *
- * @param request         - Playwright APIRequestContext
- * @param hierarchyPath   - Ordered array of units in a single path
- * @param secondPath      - Optional second path (e.g., new hierarchy for moves)
- * @param rootFather      - Parent of the highest-level unit (default: 1)
- */
-export const unlockCompleteHierarchy = async (
-  request: APIRequestContext,
-  hierarchyPath: number[],
-  secondPath?: number[],
-  rootFather: number = 1
-): Promise<void> => {
-  // Track unit → (fatherId, depth)
-  const unitInfo = new Map<number, { fatherId: number; depth: number }>();
-  
-  // Add root
-  unitInfo.set(rootFather, { fatherId: -1, depth: 0 });
-  
-  // Add first path with depth tracking
-  for (let i = 0; i < hierarchyPath.length; i++) {
-    const unitId = hierarchyPath[i];
-    const fatherId = i === 0 ? rootFather : hierarchyPath[i - 1];
-    unitInfo.set(unitId, { fatherId, depth: i + 1 });
-  }
-  
-  // Add second path with depth tracking (overwrite if same path appears in both)
-  if (secondPath) {
-    for (let i = 0; i < secondPath.length; i++) {
-      const unitId = secondPath[i];
-      const fatherId = i === 0 ? rootFather : secondPath[i - 1];
-      // Use the maximum depth if unit appears in both paths
-      const existing = unitInfo.get(unitId);
-      const newDepth = i + 1;
-      if (!existing || newDepth > existing.depth) {
-        unitInfo.set(unitId, { fatherId, depth: newDepth });
-      }
-    }
-  }
-  
-  // Build unlock list, excluding root
-  const unitsToUnlock: Array<[number, number, number]> = [];
-  for (const [unitId, info] of unitInfo.entries()) {
-    if (unitId !== rootFather) {
-      unitsToUnlock.push([unitId, info.fatherId, info.depth]);
-    }
-  }
-   // Sort by depth: level 1 units first, then level 2, etc.
-  // This ensures parents are always unlocked before children
-  unitsToUnlock.sort((a, b) => a[2] - b[2]);
-
-  console.info(`[unlockCompleteHierarchy] Starting to unlock ${unitsToUnlock.length} units from paths`);
-  for (const [unitId, fatherId, depth] of unitsToUnlock) {
-    try {
-      await lockUnitStatus(request, [unitId], fatherId, 0);
-    } catch (error) {
-      console.error(`[unlockCompleteHierarchy] Failed to unlock unit ${unitId} (father: ${fatherId}): ${error}`);
-    }
-  }
-  console.info(`[unlockCompleteHierarchy] Completed unlocking ${unitsToUnlock.length} units`);
-};
-
-/**
  * Unlock every unit in a hierarchy path, strictly top → bottom.
  *
  * The API requires that a parent is already unlocked before you can unlock
@@ -197,4 +122,84 @@ export const lockCompleteHierarchy = async (
     }
   }
   console.info(`[lockCompleteHierarchy] Completed locking ${unitsToLock.length} units`);
+};
+
+/**
+ * Unlock all units across both the original and new hierarchy paths.
+ *
+ * This is the counterpart to `lockCompleteHierarchy` and is used before a
+ * unit-move operation so that the API accepts the change.
+ *
+ * Strategy:
+ *  1. Merge both paths into a single ordered sequence, walking top → bottom.
+ *     Units that appear in both paths (shared ancestors) are only unlocked once.
+ *  2. Each unit is unlocked with the correct fatherId derived from its path.
+ *     When a unit appears in both paths its fatherId from `originalHierarchy`
+ *     is used (the relationship that is currently live in the API).
+ *
+ * Example – moving unit 101 from [2, 11, 101] to [3, 12, 101]:
+ *   unlock unit  2  (father: 1)   ← from originalHierarchy
+ *   unlock unit  3  (father: 1)   ← from newHierarchy (new branch root)
+ *   unlock unit 11  (father: 2)   ← from originalHierarchy
+ *   unlock unit 12  (father: 3)   ← from newHierarchy
+ *   unlock unit 101 (father: 11)  ← from originalHierarchy (current live parent)
+ *
+ * @param request           - Playwright APIRequestContext
+ * @param originalHierarchy - Current (old) ordered hierarchy path, top → bottom
+ * @param newHierarchy      - Target (new) ordered hierarchy path, top → bottom
+ * @param rootFather        - Parent of the topmost unit in each path (default: 1)
+ */
+export const unlockCompleteHierarchy = async (
+  request: APIRequestContext,
+  originalHierarchy: number[],
+  newHierarchy: number[],
+  rootFather: number = 1
+): Promise<void> => {
+  console.info(`[unlockCompleteHierarchy] Unlocking original path [${originalHierarchy.join(', ')}] and new path [${newHierarchy.join(', ')}]`);
+
+  // Build a map of unitId → fatherId for each path (original takes precedence for shared units)
+  const unitToFather = new Map<number, number>();
+
+  for (let i = 0; i < originalHierarchy.length; i++) {
+    const unitId = originalHierarchy[i];
+    const fatherId = i === 0 ? rootFather : originalHierarchy[i - 1];
+    unitToFather.set(unitId, fatherId);
+  }
+
+  for (let i = 0; i < newHierarchy.length; i++) {
+    const unitId = newHierarchy[i];
+    if (!unitToFather.has(unitId)) {
+      // Only add units not already present from the original path
+      const fatherId = i === 0 ? rootFather : newHierarchy[i - 1];
+      unitToFather.set(unitId, fatherId);
+    }
+  }
+
+  // Determine a stable top-to-bottom order:
+  // Walk both paths in parallel by index so higher-level units are unlocked first
+  const seen = new Set<number>();
+  const unlockOrder: number[] = [];
+  const maxLen = Math.max(originalHierarchy.length, newHierarchy.length);
+
+  for (let i = 0; i < maxLen; i++) {
+    if (i < originalHierarchy.length) {
+      const u = originalHierarchy[i];
+      if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
+    }
+    if (i < newHierarchy.length) {
+      const u = newHierarchy[i];
+      if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
+    }
+  }
+
+  for (const unitId of unlockOrder) {
+    const fatherId = unitToFather.get(unitId)!;
+    try {
+      await lockUnitStatus(request, [unitId], fatherId, 0);
+    } catch (error) {
+      console.error(`[unlockCompleteHierarchy] Failed to unlock unit ${unitId} (father: ${fatherId}): ${error}`);
+    }
+  }
+
+  console.info(`[unlockCompleteHierarchy] Completed – unlocked ${unlockOrder.length} unit(s)`);
 };

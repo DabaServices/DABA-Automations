@@ -1,4 +1,4 @@
-import { APIRequestContext, Page } from '@playwright/test';
+import { APIRequestContext } from '@playwright/test';
 
 /**
  * Lock/Unlock Unit Status API
@@ -7,7 +7,7 @@ import { APIRequestContext, Page } from '@playwright/test';
  * Takes unit number, parent unit number, lock status (0=unlock, 1=lock), and optional date.
  */
 
-const API_BASE_URL = 'http://localhost:3000';
+const API_BASE_URL = 'http://162.55.55.124:3000'; //http://localhost:3000
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -25,7 +25,6 @@ const getTodayDate = (): string => {
  * @param requestingUnitId - The unit ID that is performing the request (used in headers)
  * @param lockStatus - 0 to unlock, 1 to lock the units
  * @param screenDate - Date string in format 'YYYY-MM-DD' (optional, defaults to today)
- * @param page - Playwright Page object (optional). If provided, page will be reloaded after API call
  * @returns API response from the server
  * 
  * @example
@@ -37,17 +36,13 @@ const getTodayDate = (): string => {
  * 
  * // Lock multiple units
  * await lockUnitStatus(request, [10, 2, 3], 1, 1);
- * 
- * // Lock units and refresh page
- * await lockUnitStatus(request, [10, 2, 3], 1, 1, undefined, page);
  */
 export async function lockUnitStatus(
   request: APIRequestContext,
   unitIds: number[],
   requestingUnitId: number,
   lockStatus: 0 | 1,
-  screenDate?: string,
-  page?: Page
+  screenDate?: string
 ): Promise<any> {
   const url = `${API_BASE_URL}/statuses`;
   
@@ -89,11 +84,6 @@ export async function lockUnitStatus(
     const errorMsg = `Failed to ${statusText} units [${unitIds.join(', ')}]. Status: ${status}`;
     console.error(`[lockUnitStatus] ${errorMsg}`);
     throw new Error(errorMsg);
-  }
-  
-  // Refresh page if provided to ensure UI reflects the lock/unlock status change
-  if (page) {
-    await page.reload();
   }
   
   return responseBody;
