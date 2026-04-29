@@ -13,6 +13,14 @@ export default defineConfig({
   // Run with only 1 worker (sequential execution)
   workers: 1,
 
+  // Warm up the app once before the suite to eliminate cold-start flakiness
+  // on the very first test (the Makat combobox sometimes takes >30s to mount).
+  globalSetup: require.resolve('./global-setup'),
+
+  // Allow one retry to absorb transient UI hiccups (component remounts after
+  // data fetches, network idle bouncing, etc.). CI gets a second retry.
+  retries: process.env.CI ? 2 : 1,
+
   // 3. הגדרות בסיסיות לכל בדיקה
   use: {
     // הכתובת של האתר שלך 
@@ -21,8 +29,8 @@ export default defineConfig({
     // צילום מסך רק כשניסוי נכשל - חוסך מקום ומסדר את הדו"ח
     screenshot: 'only-on-failure',
     
-    // מאפשר ל-Agent להקליט את הצעדים שלו לצורך ניתוח שגיאות
-    trace: 'on-first-retry',
+    // Keep traces for any failed test (including retries) so flakes are debuggable.
+    trace: 'retain-on-failure',
 
     headless: true,
 

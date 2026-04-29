@@ -2,27 +2,27 @@
   "makatValidationTestData": [
     {
       "index": 0,
-      "materialId": "000000001",
+      "materialId": "000000006",
       "description": "Material 1 - Basic Validation"
     }
   ],
   "hierarchyExpansionTestData": [
     {
-      "materialId": "000000001",
+      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level",
       "unitsToExpand": [2, 11, 101]
     }
   ],
   "leafCellClickabilityTestData": [
     {
-      "materialId": "000000001",
+      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level",
       "unitsToExpand": [2, 11, 101]
     }
   ],
   "saveFunctionalityTestData": [
     {
-      "materialId": "000000001",
+      "materialId": "000000006",
       "description": "Save Button Functionality Test",
       "unitsToExpand": [2, 11, 101],
       "testValue": 5
@@ -30,7 +30,7 @@
   ],
   "commentFunctionalityTestData": [
     {
-      "materialId": "000000005",
+      "materialId": "000000006",
       "description": "Add Comment to Material Test",
       "commentText": "This is a test comment added via smoke test",
       "rowIndex": 0
@@ -38,7 +38,7 @@
   ],
   "deleteMakatTestData": [
     {
-      "materialId": "000000002",
+      "materialId": "000000006",
       "description": "Delete Material from Table Test"
     }
   ]

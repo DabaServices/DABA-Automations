@@ -12,3 +12,5 @@ node_modules/
 
 # Docker
 docker-compose.yml
+
+test-results/

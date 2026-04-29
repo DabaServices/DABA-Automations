@@ -1,4 +1,4 @@
-import { Page, Locator } from '@playwright/test';
+import { Page, Locator, expect } from '@playwright/test';
 
 /**
  * MainPage - Base Page Object for the application.
@@ -77,7 +77,7 @@ export class MainPage {
       container: headerContainer,
       confirmationPopupTrigger: page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-trigger"]'),
       confirmationPopupConfirmBtn: page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-confirm-button"]'),
-      saveBtn: page.getByTestId('save-button-tooltip-trigger'),
+      saveBtn: page.getByTestId('save-button-icon'),
       menuBtn: page.getByTestId('unit-hierarchy-drawer-trigger'),
     };
 
@@ -278,18 +278,18 @@ export class MainPage {
   async waitForMakatComboboxReady(timeout: number = 15000): Promise<void> {
     console.info(`[waitForMakatComboboxReady] Waiting for makat combobox to be ready (${timeout}ms)...`);
     try {
-      await this.makatCombobox.waitFor({ state: 'visible', timeout });
+      // The combobox can briefly disappear/remount while React rehydrates
+      // after the lock & hierarchy fetches finish. We therefore:
+      //   1. Wait for it to be visible.
+      //   2. Wait for it to be enabled.
+      //   3. Re-check visibility after a short settle to make sure it didn't
+      //      get unmounted again while we were transitioning.
+      await expect(this.makatCombobox).toBeVisible({ timeout });
+      await expect(this.makatCombobox).toBeEnabled({ timeout: Math.min(10_000, timeout) });
 
-      await this.page.waitForFunction(
-        (selector) => {
-          const el = document.querySelector(selector);
-          return el && !el.hasAttribute('disabled') && !(el as HTMLInputElement).disabled;
-        },
-        '[role="combobox"]',
-        { timeout: 5000 }
-      ).catch(() => {
-        console.warn(`[waitForMakatComboboxReady] Timeout waiting for combobox to become enabled`);
-      });
+      // Let React finish any in-flight remount before consumers click.
+      await this.page.waitForTimeout(200);
+      await expect(this.makatCombobox).toBeVisible({ timeout: 5_000 });
 
       await this.makatCombobox.scrollIntoViewIfNeeded();
       console.info(`[waitForMakatComboboxReady] Makat combobox is ready`);
@@ -428,15 +428,37 @@ export class MainPage {
    * Reads the numeric value displayed for a given (materialId, unitId) cell.
    * Tries the top-level `row-cell-*` first and falls back to `numbered-cell-*`.
    * Returns 0 when the cell is not present or has no input value.
+   *
+   * Optimised: performs the visibility / fallback resolution inside a single
+   * `page.evaluate` call so we don't pay for two sequential Playwright
+   * round-trips with 500ms timeouts.
    */
   async getCellValue(materialId: string, unitId: number): Promise<number> {
-    let cell = this.rowCell(materialId, unitId);
-    if (!(await cell.first().isVisible({ timeout: 500 }).catch(() => false))) {
-      cell = this.page.locator(`[data-testid*="numbered-cell-${materialId}-${unitId}"]`);
-    }
+    const raw = await this.page.evaluate(
+      ({ materialId, unitId }) => {
+        const readInput = (root: Element | null): string | null => {
+          if (!root) return null;
+          const input = root.querySelector('[data-testid*="input"]') as HTMLInputElement | null;
+          if (!input) return null;
+          return input.value ?? null;
+        };
 
-    const inputField = cell.locator('[data-testid*="input"]').first();
-    const raw = await inputField.inputValue().catch(() => '0');
+        // Try top-level row-cell first.
+        const rowCell = document.querySelector(
+          `[data-testid="row-cell-${materialId}-${unitId}"]`
+        );
+        const fromRow = readInput(rowCell);
+        if (fromRow != null && fromRow !== '') return fromRow;
+
+        // Fallback: any numbered-cell match.
+        const numbered = document.querySelector(
+          `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
+        );
+        const fromNumbered = readInput(numbered);
+        return fromNumbered ?? '0';
+      },
+      { materialId, unitId }
+    );
     return parseInt(raw || '0', 10);
   }
 
@@ -447,51 +469,114 @@ export class MainPage {
    * Side-effect: populates {@link _hierarchyMap} with the parent → children
    * relationship discovered while traversing, so subclasses can perform
    * aggregation checks against the captured snapshot.
+   *
+   * PERFORMANCE: The previous implementation issued dozens of sequential
+   * Playwright calls (each with 500ms visibility timeouts) which made this
+   * step the dominant cost of `test_aggregationVerification`. This version
+   * gathers everything we need from the DOM in a single `page.evaluate`,
+   * reducing the cost from many seconds to a few milliseconds.
    */
   async captureAllVisibleCellValuesAtEachLevel(
     materialId: string,
     unitsToExpand: number[]
   ): Promise<Map<number, number>> {
-    const allCellValues = new Map<number, number>();
-    const hierarchyMap = new Map<number, number[]>();
+    const snapshot = await this.page.evaluate(
+      ({ materialId, unitsToExpand }) => {
+        // Helpers ────────────────────────────────────────────────────────
+        const isVisible = (el: Element | null): boolean => {
+          if (!el) return false;
+          const he = el as HTMLElement;
+          if (he.offsetParent === null && getComputedStyle(he).position !== 'fixed') {
+            return false;
+          }
+          const rect = he.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        };
 
-    // Capture each unit on the requested path.
-    for (const unitId of unitsToExpand) {
-      const value = await this.getCellValue(materialId, unitId);
-      allCellValues.set(unitId, value);
-    }
+        const readInputValue = (root: Element | null): string => {
+          if (!root) return '0';
+          const input = root.querySelector('[data-testid*="input"]') as HTMLInputElement | null;
+          return input?.value ?? '0';
+        };
 
-    // For each parent on the path, capture all visible numbered children.
-    for (const parentUnitId of unitsToExpand) {
-      const subRow = await this.findVisibleSubRow(materialId, parentUnitId);
+        const getCellValueDom = (unitId: number): number => {
+          const rowCell = document.querySelector(
+            `[data-testid="row-cell-${materialId}-${unitId}"]`
+          );
+          let raw = readInputValue(rowCell);
+          if (!raw || raw === '0') {
+            const numbered = document.querySelector(
+              `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
+            );
+            const altRaw = readInputValue(numbered);
+            // Prefer numbered value if rowCell missing/empty.
+            if (!rowCell) raw = altRaw;
+            else if (altRaw && altRaw !== '0') raw = altRaw;
+          }
+          return parseInt(raw || '0', 10);
+        };
 
-      if (subRow) {
-        const testIds = await subRow
-          .locator(`[data-testid*="numbered-cell-${materialId}-"]`)
-          .evaluateAll((els: any[]) =>
-            els
-              .map(e => e.getAttribute('data-testid'))
-              .filter((id: string | null) => id && !id.includes('increment') && !id.includes('decrement'))
-          )
-          .catch(() => []);
+        const findVisibleSubRow = (parentUnitId: number): Element | null => {
+          const wrapper = document.querySelector(
+            `[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`
+          );
+          if (isVisible(wrapper)) return wrapper;
 
-        const children: number[] = [];
-        for (const testId of testIds) {
-          const match = testId?.match(/numbered-cell-[^-]+-(\d+)/);
-          if (match) {
-            const childUnitId = parseInt(match[1], 10);
-            if (childUnitId !== parentUnitId && !children.includes(childUnitId)) {
-              children.push(childUnitId);
-              const val = await this.getCellValue(materialId, childUnitId);
-              allCellValues.set(childUnitId, val);
+          const inner = document.querySelector(
+            `[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`
+          );
+          if (isVisible(inner)) return inner;
+          return null;
+        };
+
+        // Capture path values ────────────────────────────────────────────
+        const allCellValues: Array<[number, number]> = [];
+        for (const unitId of unitsToExpand) {
+          allCellValues.push([unitId, getCellValueDom(unitId)]);
+        }
+
+        // For each parent, find visible numbered children + their values.
+        const hierarchy: Array<[number, number[]]> = [];
+        const seenChildren = new Set<number>(unitsToExpand);
+
+        for (const parentUnitId of unitsToExpand) {
+          const subRow = findVisibleSubRow(parentUnitId);
+          if (!subRow) {
+            hierarchy.push([parentUnitId, []]);
+            continue;
+          }
+
+          const cellEls = Array.from(
+            subRow.querySelectorAll(`[data-testid*="numbered-cell-${materialId}-"]`)
+          );
+
+          const children: number[] = [];
+          for (const el of cellEls) {
+            const tid = el.getAttribute('data-testid') ?? '';
+            if (tid.includes('increment') || tid.includes('decrement')) continue;
+
+            const m = tid.match(/numbered-cell-[^-]+-(\d+)/);
+            if (!m) continue;
+            const childUnitId = parseInt(m[1], 10);
+            if (childUnitId === parentUnitId) continue;
+            if (children.includes(childUnitId)) continue;
+
+            children.push(childUnitId);
+            if (!seenChildren.has(childUnitId)) {
+              seenChildren.add(childUnitId);
+              allCellValues.push([childUnitId, getCellValueDom(childUnitId)]);
             }
           }
+          hierarchy.push([parentUnitId, children]);
         }
-        hierarchyMap.set(parentUnitId, children);
-      } else {
-        hierarchyMap.set(parentUnitId, []);
-      }
-    }
+
+        return { allCellValues, hierarchy };
+      },
+      { materialId, unitsToExpand }
+    );
+
+    const allCellValues = new Map<number, number>(snapshot.allCellValues);
+    const hierarchyMap = new Map<number, number[]>(snapshot.hierarchy);
 
     this._hierarchyMap = hierarchyMap;
     return allCellValues;

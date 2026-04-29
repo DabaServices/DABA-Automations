@@ -55,7 +55,7 @@ leafCellClickabilityTestData.forEach((testData) => {
       await hierarchyPage.expandHierarchyToLeaf(testData.materialId, testData.unitsToExpand);
       
       // Set values in leaf cells
-      const leafValues = await hierarchyPage.setLeafCellValues(testData.materialId, testData.unitsToExpand, 1);
+      const leafValues = await hierarchyPage.setLeafCellValues(testData.materialId, testData.unitsToExpand, 2);
       expect(leafValues.size).toBeGreaterThan(0);
       console.log(`✓ Successfully set values in ${leafValues.size} leaf cells`);
     }

@@ -105,7 +105,7 @@ export class ShechelPage extends MainPage {
           const btn = el.closest('button') || el;
           return !btn.hasAttribute('disabled') && !(btn as HTMLButtonElement).disabled;
         },
-        '[data-testid="save-button-tooltip-trigger"]',
+        '[data-testid="save-button-icon"]',
         { timeout: 15000 }
       );
 
@@ -227,6 +227,21 @@ export class ShechelPage extends MainPage {
         await nextCell.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {
           console.warn(`[expandHierarchyToLeaf] Next-level cell for unit ${nextUnit} did not appear in time.`);
         });
+      } else {
+        // Last expansion in the path: wait for the leaf's children container
+        // (`sub-row-cells-wrapper-${mat}-${unit}`) to actually render.
+        // Without this, setLeafCellValues runs against an empty subtree and
+        // silently finds 0 cells.
+        await this.page
+          .waitForSelector(
+            `[data-testid="sub-row-cells-wrapper-${materialId}-${unitId}"]`,
+            { state: 'visible', timeout: 10_000 }
+          )
+          .catch(() => {
+            console.warn(
+              `[expandHierarchyToLeaf] sub-row-cells-wrapper for unit ${unitId} did not appear in time.`
+            );
+          });
       }
     }
 
@@ -236,156 +251,136 @@ export class ShechelPage extends MainPage {
 
   // ──────────────── Aggregation Workflow ────────────────
 
+  /**
+   * Sets values on every leaf cell that became visible after the hierarchy
+   * was expanded down `unitsToExpand`.
+   *
+   * Real testids emitted by the app:
+   *   - `sub-row-cells-wrapper-${mat}-${parentUnit}` — container holding the
+   *     children of an expanded parent.
+   *   - `sub-row-cell-${mat}-${unitId}` — one cell per child unit. All leaves
+   *     are now rendered as `sub-row-cell` (no second leaf type), so every
+   *     `sub-row-cell` inside the deepest wrapper that isn't itself a unit
+   *     on the expanded path is treated as a leaf and incremented
+   *     `incrementValue` times. Inside each cell:
+   *       * `[data-testid="increment"]` – the increment button.
+   *       * `[data-testid="input"]`     – the numeric value (read-only).
+   */
   async setLeafCellValues(
     materialId: string,
     unitsToExpand: number[],
     incrementValue: number = 4
   ): Promise<Map<string, number>> {
     const setLeafValues = new Map<string, number>();
+    const parentUnits = new Set(unitsToExpand.map(String));
+    const clicks = Math.max(0, incrementValue);
 
     try {
-      let parentUnitId = unitsToExpand[unitsToExpand.length - 1];
-      const leafUnitId = parentUnitId;
+      console.log(
+        `[setLeafCellValues] Path: ${unitsToExpand.join(' -> ')}, increment=${clicks}`
+      );
 
-      console.log(`[setLeafCellValues] Full hierarchy path: ${unitsToExpand.join(' -> ')}`);
-      console.log(`[setLeafCellValues] Trying parent unit: ${parentUnitId}`);
-
-      let subRow = await this.findVisibleSubRow(materialId, parentUnitId);
-
-      if (!subRow && unitsToExpand.length > 1) {
-        parentUnitId = unitsToExpand[unitsToExpand.length - 2];
-        console.log(`[setLeafCellValues] No children found under ${leafUnitId}, trying parent unit: ${parentUnitId}`);
-        subRow = await this.findVisibleSubRow(materialId, parentUnitId);
+      // 1. Locate the deepest sub-row-cells-wrapper that actually rendered.
+      let parentUnitId: number | null = null;
+      let wrapper: Locator | null = null;
+      for (let i = unitsToExpand.length - 1; i >= 0; i--) {
+        const candidate = this.page
+          .locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${unitsToExpand[i]}"]`)
+          .first();
+        if (await candidate.count()) {
+          if (await candidate.isVisible({ timeout: 1500 }).catch(() => false)) {
+            parentUnitId = unitsToExpand[i];
+            wrapper = candidate;
+            break;
+          }
+        }
       }
 
-      if (!subRow) {
-        console.warn(`[setLeafCellValues] Sub-row container not found for parent unit ${parentUnitId}`);
+      if (!wrapper || parentUnitId === null) {
+        console.warn(
+          `[setLeafCellValues] No sub-row-cells-wrapper rendered for path [${unitsToExpand.join(' -> ')}]`
+        );
         return setLeafValues;
       }
 
-      // ── Scenario A: Initialize zero-cells ──
-      const zeroCells = this.zeroCellsUnder(subRow, materialId);
-      const zeroCellCount = await zeroCells.count();
-      let clickedZeroCells = false;
+      console.log(`[setLeafCellValues] Using parent unit ${parentUnitId} as leaf-children container`);
 
-      console.log(`[setLeafCellValues] Found ${zeroCellCount} zero-cells under parent ${parentUnitId}`);
+      // 2. Enumerate child unit IDs from the sub-row-cell testids inside the wrapper.
+      const childUnitIds: string[] = await wrapper.evaluate(
+        (root: Element, mat: string) => {
+          const ids: string[] = [];
+          root
+            .querySelectorAll(`[data-testid^="sub-row-cell-${mat}-"]`)
+            .forEach((el) => {
+              const tid = el.getAttribute('data-testid') || '';
+              const m = tid.match(/^sub-row-cell-[^-]+-(\d+)$/);
+              if (m) ids.push(m[1]);
+            });
+          return Array.from(new Set(ids));
+        },
+        materialId
+      );
 
-      const zeroCellIds: string[] = [];
-      if (zeroCellCount > 0) {
-        for (let i = 0; i < zeroCellCount; i++) {
-          const testId = await zeroCells.nth(i).getAttribute('data-testid');
-          if (testId) zeroCellIds.push(testId);
-        }
+      const leafChildren = childUnitIds.filter((u) => !parentUnits.has(u));
+      console.log(
+        `[setLeafCellValues] Discovered ${leafChildren.length} leaf cell(s) under ${parentUnitId}: [${leafChildren.join(', ')}]`
+      );
 
-        console.log(`[setLeafCellValues] Zero-cell IDs found: ${zeroCellIds.join(', ')}`);
+      // 3. For each leaf cell, click the increment button `clicks` times.
+      for (const unitId of leafChildren) {
+        try {
+          const cell = wrapper.locator(`[data-testid="sub-row-cell-${materialId}-${unitId}"]`).first();
+          const incrementBtn = cell.locator('[data-testid="increment"]').first();
+          const inputField = cell.locator('[data-testid="input"]').first();
 
-        for (const testId of zeroCellIds) {
+          await cell.scrollIntoViewIfNeeded().catch(() => undefined);
+
+          let currentValue = 0;
           try {
-            const cell = this.page.locator(`[data-testid="${testId}"]`).first();
-            const unitMatch = testId.match(/zero-cell-icon-[^-]+-(\d+)/);
-            const childUnitId = unitMatch ? unitMatch[1] : 'unknown';
-
-            console.log(`[setLeafCellValues] Clicking zero-cell for child unit ${childUnitId} (child of ${parentUnitId})`);
-            await cell.click();
-            setLeafValues.set(childUnitId, 1);
-            clickedZeroCells = true;
-          } catch (error) {
-            console.warn(`Failed to click zero-cell ${testId}:`, error);
-            continue;
+            currentValue = parseInt(
+              (await inputField.inputValue().catch(() => '0')) || '0',
+              10
+            );
+          } catch {
+            currentValue = 0;
           }
-        }
 
-        // Note: We intentionally do NOT wait for numbered-cells to render here.
-        // `waitForFunction` interacts badly with `slowMo` (each poll adds slowMo ms),
-        // making even a 1s timeout balloon to 10+ seconds. The Scenario B loop
-        // below already auto-waits per cell via `isVisible({ timeout })`.
-      }
-
-      // ── Scenario B: Increment existing group cells ──
-      const numberedCells = this.numberedCellsUnder(subRow, materialId);
-      const numberedCellCount = await numberedCells.count();
-
-      console.log(`[setLeafCellValues] Found ${numberedCellCount} numbered-cells under parent ${parentUnitId}`);
-
-      if (numberedCellCount > 0 && incrementValue > 0) {
-        const unitIds: string[] = [];
-        for (let i = 0; i < numberedCellCount; i++) {
-          const testId = await numberedCells.nth(i).getAttribute('data-testid');
-          if (testId && !testId.includes('increment') && !testId.includes('decrement')) {
-            const unitMatch = testId.match(/numbered-cell-\d+-(\d+)/);
-            if (unitMatch) {
-              const unitId = unitMatch[1];
-              if (!unitIds.includes(unitId)) {
-                unitIds.push(unitId);
-              }
-            }
+          console.log(
+            `[setLeafCellValues] Unit ${unitId}: current=${currentValue}, +${clicks} click(s)`
+          );
+          for (let i = 0; i < clicks; i++) {
+            await incrementBtn.click();
           }
-        }
 
-        console.log(`[setLeafCellValues] Unique child unit IDs with numbered-cells: ${unitIds.join(', ')}`);
-
-        const adjustedIncrementValue = clickedZeroCells ? Math.max(0, incrementValue - 1) : incrementValue;
-        console.log(`[setLeafCellValues] Incrementing cells by ${adjustedIncrementValue} (adjusted from ${incrementValue})`);
-
-        for (const unitId of unitIds) {
+          // Small settle so the input reflects the final state.
+          await this.page.waitForTimeout(150);
+          let finalValue = currentValue + clicks;
           try {
-            const numberedCellContainer = subRow.locator(`[data-testid*="numbered-cell"][data-testid*="${unitId}"]`).first();
-
-            const cellExists = await numberedCellContainer.isVisible({ timeout: 1000 }).catch(() => false);
-            if (!cellExists) continue;
-
-            let incrementBtn = numberedCellContainer.locator(`[data-testid*="increment"]`).first();
-
-            if (!(await incrementBtn.isVisible({ timeout: 500 }).catch(() => false))) {
-              incrementBtn = this.page.locator(
-                `[data-testid*="numbered-cell"][data-testid*="${unitId}"] [data-testid*="increment"]`
-              ).first();
-            }
-
-            if (await incrementBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-              const inputField = numberedCellContainer.locator(`[data-testid*="input"]`).first();
-              let currentValue = 0;
-              try {
-                const inputValue = await inputField.inputValue().catch(() => '0');
-                currentValue = parseInt(inputValue || '0', 10);
-              } catch {
-                currentValue = 0;
-              }
-
-              const targetValue = currentValue + adjustedIncrementValue;
-              console.log(`[setLeafCellValues] Unit ${unitId}: Current=${currentValue}, incrementing by ${adjustedIncrementValue} to ${targetValue}`);
-
-              for (let i = 0; i < adjustedIncrementValue; i++) {
-                await incrementBtn.click();
-              }
-
-              // Brief wait for UI to settle after all clicks
-              await this.page.waitForTimeout(300);
-
-              let actualFinalValue = targetValue;
-              try {
-                const actualInputValue = await inputField.inputValue().catch(() => '0');
-                actualFinalValue = parseInt(actualInputValue || '0', 10);
-              } catch {
-                actualFinalValue = targetValue;
-              }
-
-              setLeafValues.set(unitId, actualFinalValue);
-              console.log(`[setLeafCellValues] Unit ${unitId}: Final value = ${actualFinalValue}`);
-            } else {
-              console.warn(`[setLeafCellValues] Increment button not visible for unit ${unitId}`);
-            }
-          } catch (error) {
-            console.warn(`Failed to increment cell for unit ${unitId}:`, error);
-            continue;
+            finalValue = parseInt(
+              (await inputField.inputValue().catch(() => `${finalValue}`)) || `${finalValue}`,
+              10
+            );
+          } catch {
+            /* fall back to computed value */
           }
+
+          setLeafValues.set(unitId, finalValue);
+          console.log(`[setLeafCellValues] Unit ${unitId}: final=${finalValue}`);
+        } catch (err) {
+          console.warn(`[setLeafCellValues] Unit ${unitId} failed: ${err}`);
         }
       }
 
-      console.log(`[setLeafCellValues] Completed. Set values for ${setLeafValues.size} cells: ${Array.from(setLeafValues.entries()).map(([id, val]) => `${id}=${val}`).join(', ')}`);
+      console.log(
+        `[setLeafCellValues] Completed. Set values for ${setLeafValues.size} cells: ${Array.from(
+          setLeafValues.entries()
+        )
+          .map(([id, val]) => `${id}=${val}`)
+          .join(', ')}`
+      );
       return setLeafValues;
     } catch (error) {
-      console.error(`Failed to set leaf cell values:`, error);
+      console.error(`[setLeafCellValues] Fatal: ${error}`);
       return setLeafValues;
     }
   }
