@@ -1,146 +1,340 @@
 import { Page, Locator } from '@playwright/test';
 
 /**
- * mainPage - Page Object Model for Hierarchical Supply System Module
- * 
- * PURPOSE: Encapsulates all UI interactions for the hierarchical supply system
- * 
- * MAIN FLOW:
- * 1. Navigate to the module (goto)
- * 2. Select and add a Makat (material) to the table
- * 3. Expand the hierarchy through network buttons to reach leaf units
- * 4. Set values at changeable leaf cells (zero-cells and numbered-cells)
- * 5. Verify aggregation: parent cell value = sum of all child cell values
- * 
- * KEY CONCEPTS:
- * - Makat: Material ID (e.g., 'm0000001') identifies the inventory item
- * - Unit: Military hierarchical unit (Pikud, Ugda, Hativah, Gedud, Matkal)
- * - Hierarchy: Tree structure where parent units contain child units
- * - Aggregation: Parent value automatically = SUM(all child values)
- * - Leaf Cell: Bottom-level unit cell where data entry happens
- * - Zero-Cell: Empty leaf node that can be clicked to initialize value
- * - Numbered-Cell: Leaf node with incrementable value
- * - Group Cell: Numbered-cell-group contains pre-existing values
+ * MainPage - Base Page Object for the application.
+ *
+ * Contains shared locators and methods reused across page objects:
+ * - The `.committees-header` section (organized as a header object)
+ * - The `material-search-combobox-chips` element
+ * - Makat (material) selection & addition workflow
+ * - Generic cell value capture used by aggregation flows
+ *
+ * All page classes extend this base.
  */
-export class mainPage {
+export class MainPage {
   readonly page: Page;
 
-  // ============ Locators (Defined as Class Properties) ============
-  // These are CSS/role selectors that find UI elements on the page
+  /** Organized group of header elements within .committees-header */
+  public readonly header: {
+    /** The root header container (.committees-header) */
+    readonly container: Locator;
+    /** Confirmation popup trigger inside the header */
+    readonly confirmationPopupTrigger: Locator;
+    /** Confirmation popup confirm button inside the header */
+    readonly confirmationPopupConfirmBtn: Locator;
+    /** Save button in the header area */
+    readonly saveBtn: Locator;
+    /** Menu / drawer trigger button */
+    readonly menuBtn: Locator;
+  };
 
-  // Navigation & General (drawer and menu elements)
-  readonly unitHierarchyDrawerContent: Locator;
-  readonly unitHierarchyContent: Locator;
-  readonly menuBtn: Locator;
+  /** Material search combobox chips element */
+  readonly materialSearchChips: Locator;
 
-  // Makat Dropdown & Selection (material selection dropdowns)
-  readonly makatCombobox: Locator;
-  readonly makatOptions: Locator;
+  /** Makat search field container (.material-search-combobox-container) */
+  readonly makatSearchField: Locator;
 
-  // Add Button (button to add material to table)
-  readonly addButton: Locator;
+  /**
+   * Comment trigger icon locator – matches all rows.
+   * The underlying `data-testid` is dynamic, e.g. `row-comment-trigger-icon-000000001`,
+   * so a partial attribute selector (`*=`) is used.
+   * Use {@link commentTriggerIconFor} to scope to a specific Makat ID.
+   */
+  readonly commentTriggerIcon: Locator;
 
-  // Content Rows & Sub-rows (table rows and hierarchy expansion)
-  readonly contentRows: Locator;
-  readonly firstRow: Locator;
-  readonly subRowExpands: Locator;
+  /** Drawer content area for unit hierarchy */
+  protected readonly unitHierarchyDrawerContent: Locator;
+  /** Inner content container for unit hierarchy */
+  protected readonly unitHierarchyContent: Locator;
 
-  // Inventory Input (Zero Cell & Numbered Cell) (data entry cells)
-  readonly zeroCellChips: Locator;
-  readonly numberedCellInputs: Locator;
+  // ──────────────── Makat / Table Locators ────────────────
+
+  /** Makat (material) search combobox */
+  protected readonly makatCombobox: Locator;
+  /** Dropdown options inside the makat combobox */
+  protected readonly makatOptions: Locator;
+  /** Button (start adornment) used to add a selected material to the table */
+  protected readonly addButton: Locator;
+  /** All content rows in the table */
+  protected readonly contentRows: Locator;
+
+  /**
+   * Internal hierarchy map populated by {@link captureAllVisibleCellValuesAtEachLevel}
+   * and consumed by aggregation verification routines in subclasses.
+   */
+  protected _hierarchyMap: Map<number, number[]> = new Map();
 
   constructor(page: Page) {
     this.page = page;
 
-    // Initialize all locators - these find UI elements for later interaction
-    // All locators are cached as class properties for reuse throughout tests
+    // Drawer
     this.unitHierarchyDrawerContent = page.getByTestId('unit-hierarchy-drawer-content');
     this.unitHierarchyContent = page.getByTestId('unit-hierarchy-content');
-    this.menuBtn = page.getByTestId('unit-hierarchy-drawer-trigger');
 
+    // Header elements group
+    const headerContainer = page.locator('.committees-header');
+    this.header = {
+      container: headerContainer,
+      confirmationPopupTrigger: page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-trigger"]'),
+      confirmationPopupConfirmBtn: page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-confirm-button"]'),
+      saveBtn: page.getByTestId('save-button-tooltip-trigger'),
+      menuBtn: page.getByTestId('unit-hierarchy-drawer-trigger'),
+    };
+
+    // Material search combobox chips
+    this.materialSearchChips = page.getByTestId('material-search-combobox-chips');
+
+    // Makat search field container
+    this.makatSearchField = page.locator('.material-search-combobox-container');
+
+    // Comment trigger icon (dynamic data-testid: row-comment-trigger-icon-<makatId>)
+    this.commentTriggerIcon = page.locator('[data-testid*="row-comment-trigger-icon"]');
+
+    // Makat selection
     this.makatCombobox = page.getByRole('combobox', { name: /בחירת מק״ט/ });
     this.makatOptions = page.locator('[role="option"]');
 
-    this.addButton = page.getByTestId('material-search-combobox-start-adornment');
+    // Add button
+    this.addButton = page.getByTestId('start-adornment');
 
+    // Table rows
     this.contentRows = page.locator('[data-testid*="content-row"]');
-    this.firstRow = page.locator('[data-testid*="content-row"]').first();
-    this.subRowExpands = page.locator(`[data-testid*="sub-row-indicator"]`);
-
-    this.zeroCellChips = page.locator('[data-testid*="zero-cell"]');
-    this.numberedCellInputs = page.locator('[data-testid*="numbered-cell"] [data-testid*="input"]');
   }
 
-  // ============ Utility Methods ============
-  // Purpose: Helper methods for common operations
+  // ──────────────── Locator Helpers ────────────────
 
   /**
-   * Wait for network requests to complete
-   * This is a wrapper around page.waitForLoadState('networkidle')
-   * with error handling to prevent test failures on network timeouts
+   * Returns the comment trigger icon locator for a specific Makat ID.
+   * Handles dynamic test IDs such as `row-comment-trigger-icon-000000001`.
+   */
+  commentTriggerIconFor(makatId: string): Locator {
+    return this.page.locator(`[data-testid="row-comment-trigger-icon-${makatId}"]`);
+  }
+
+  /** Numbered cell locator for a (materialId, unitId) pair. */
+  protected numberedCell(materialId: string, unitId: number): Locator {
+    return this.page.locator(`[data-testid*="numbered-cell-${materialId}-${unitId}"]`).first();
+  }
+
+  /** Top-level row cell locator for a (materialId, unitId) pair. */
+  protected rowCell(materialId: string, unitId: number): Locator {
+    return this.page.locator(`[data-testid="row-cell-${materialId}-${unitId}"]`);
+  }
+
+  /** Sub-row cells wrapper container under a parent unit. */
+  protected subRowCellsWrapper(materialId: string, parentUnitId: number): Locator {
+    return this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`);
+  }
+
+  /** Sub-row cells container under a parent unit. */
+  protected subRowCells(materialId: string, parentUnitId: number): Locator {
+    return this.page.locator(`[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`);
+  }
+
+  /**
+   * Resolves a visible sub-row container for a given parent unit, trying the
+   * wrapper first and falling back to the inner cells container.
+   */
+  protected async findVisibleSubRow(materialId: string, parentUnitId: number): Promise<Locator | null> {
+    let subRow = this.subRowCellsWrapper(materialId, parentUnitId);
+    if (await subRow.first().isVisible({ timeout: 500 }).catch(() => false)) return subRow;
+
+    subRow = this.subRowCells(materialId, parentUnitId);
+    if (await subRow.first().isVisible({ timeout: 500 }).catch(() => false)) return subRow;
+
+    return null;
+  }
+
+  // ──────────────── Utility Methods ────────────────
+
+  /**
+   * Wait for network requests to complete and page to be fully interactive.
+   */
+  async waitForPageReady(): Promise<void> {
+    try {
+      await this.page.waitForLoadState('domcontentloaded');
+      await this.page.waitForLoadState('networkidle');
+    } catch (error) {
+      console.warn(`[waitForPageReady] Some network waits timed out, continuing: ${error}`);
+    }
+  }
+
+  /**
+   * Wait for network requests to complete.
    */
   async waitForNetworkIdle(): Promise<void> {
     try {
       await this.page.waitForLoadState('networkidle');
     } catch {
-      // Silently catch network timeout errors as they're not critical for test execution
-      // The page may still be functional even if some background requests are pending
+      // Silently catch – page may still be functional
     }
   }
 
-  // ============ Navigation ============
-  // Purpose: Load the committees page and wait for full initialization
+  // ──────────────── Navigation ────────────────
 
-  async goto() {
-    // Navigate using the baseURL from playwright.config.ts
-    // If baseURL is configured, page.goto('/') will use it; otherwise falls back to full URL
+  /**
+   * Navigate to the application root and wait for full initialisation.
+   */
+  async goto(): Promise<void> {
     await this.page.goto('/');
-    // Wait for all network requests to complete before proceeding with tests
-    await this.waitForNetworkIdle();
+    await this.waitForPageReady();
   }
 
-  // ============ Makat Selection and Addition ============
-  // Purpose: Find a material (Makat) in the dropdown and add it to the table
+  /**
+   * Open the unit hierarchy drawer if it is not already open.
+   */
+  async ensureDrawerOpen(): Promise<void> {
+    try {
+      const isVisible = await this.unitHierarchyDrawerContent.isVisible({ timeout: 2000 }).catch(() => false);
+
+      if (!isVisible) {
+        console.info(`[ensureDrawerOpen] Drawer not visible, opening it...`);
+        await this.header.menuBtn.click();
+        await this.unitHierarchyDrawerContent.waitFor({ state: 'visible', timeout: 5000 });
+        console.info(`[ensureDrawerOpen] Drawer opened successfully`);
+      }
+    } catch (error) {
+      console.warn(`[ensureDrawerOpen] Failed to open drawer: ${error}`);
+    }
+  }
+
+  // ──────────────── Makat Management (search field) ────────────────
 
   /**
-   * Select a Makat from the dropdown by index
-   * 
-   * FLOW:
-   * 1. Click combobox to open the dropdown list
-   * 2. Get the option element at the specified index
-   * 3. Extract the text content (material ID)
-   * 4. Click the option to select it
-   * 5. Return the material ID for verification
+   * Searches for a Makat by ID in the search field and adds it.
+   *
+   * Flow:
+   *  1. Click into the `.material-search-combobox-container` input.
+   *  2. Type the Makat ID.
+   *  3. Pick the matching dropdown option.
+   *
+   * @param makatId The material/Makat identifier to search for and add.
    */
-  /**
-   * Select a Makat from dropdown by partial text match
-   * 
-   * FLOW:
-   * 1. Click combobox to open dropdown
-   * 2. Type the material ID to filter the options
-   * 3. Iterate through filtered options to find a match
-   * 4. Click the matching option when found
-   * 5. If not found, use getByText as fallback method
-   * 
-   * @param materialIdOrText - The material ID to search for (e.g., 'm0000002')
-   */
-  async selectMakatFromDropdown(materialIdOrText: string) {
-    console.info(`[selectMakatFromDropdown] Selecting material: ${materialIdOrText}`);
+  async addMakat(makatId: string): Promise<void> {
+    console.info(`[addMakat] Adding Makat: ${makatId}`);
     try {
-      await this.makatCombobox.click({ timeout: 5000 });
-      await this.makatOptions.first().waitFor({ timeout: 5000 }).catch(() => {
-        // Silent fail - options might already be visible
+      await this.makatSearchField.waitFor({ state: 'visible', timeout: 10_000 });
+
+      const input = this.makatSearchField.locator('input').first();
+      await input.click();
+      await input.fill(makatId);
+
+      // Wait for the dropdown option matching the makat ID and click it.
+      const option = this.page
+        .locator('[role="option"], [data-testid*="material-search-option"]')
+        .filter({ hasText: makatId })
+        .first();
+
+      await option.waitFor({ state: 'visible', timeout: 10_000 });
+      await option.click();
+
+      await this.waitForNetworkIdle();
+      console.info(`[addMakat] Successfully added Makat: ${makatId}`);
+    } catch (error) {
+      console.error(`[addMakat] Failed to add Makat ${makatId}: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Finds the row for a given Makat and clicks its comment trigger icon,
+   * then writes the supplied comment text.
+   *
+   * Handles dynamic test IDs such as `row-comment-trigger-icon-000000001`
+   * via {@link commentTriggerIconFor}.
+   *
+   * @param makatId The Makat identifier whose row should receive the comment.
+   * @param text    The comment text to enter.
+   */
+  async addComment(makatId: string, text: string): Promise<void> {
+    console.info(`[addComment] Adding comment to Makat ${makatId}`);
+    try {
+      const icon = this.commentTriggerIconFor(makatId);
+      await icon.waitFor({ state: 'visible', timeout: 10_000 });
+      await icon.click();
+
+      // Locate the comment editor that appears after clicking the icon.
+      const commentField = this.page
+        .locator(
+          '[data-testid*="comment-input"], [data-testid*="comment-textarea"], textarea[placeholder*="comment" i], input[placeholder*="comment" i]'
+        )
+        .first();
+
+      await commentField.waitFor({ state: 'visible', timeout: 5_000 });
+      await commentField.fill(text);
+
+      console.info(`[addComment] Comment added to Makat ${makatId}`);
+    } catch (error) {
+      console.error(`[addComment] Failed to add comment to Makat ${makatId}: ${error}`);
+      throw error;
+    }
+  }
+
+  // ──────────────── Makat Selection & Addition (combobox) ────────────────
+
+  /**
+   * Wait until the Makat combobox is visible and enabled.
+   */
+  async waitForMakatComboboxReady(timeout: number = 15000): Promise<void> {
+    console.info(`[waitForMakatComboboxReady] Waiting for makat combobox to be ready (${timeout}ms)...`);
+    try {
+      await this.makatCombobox.waitFor({ state: 'visible', timeout });
+
+      await this.page.waitForFunction(
+        (selector) => {
+          const el = document.querySelector(selector);
+          return el && !el.hasAttribute('disabled') && !(el as HTMLInputElement).disabled;
+        },
+        '[role="combobox"]',
+        { timeout: 5000 }
+      ).catch(() => {
+        console.warn(`[waitForMakatComboboxReady] Timeout waiting for combobox to become enabled`);
       });
 
+      await this.makatCombobox.scrollIntoViewIfNeeded();
+      console.info(`[waitForMakatComboboxReady] Makat combobox is ready`);
+    } catch (error) {
+      console.error(`[waitForMakatComboboxReady] Failed: ${error}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Open the Makat combobox, type the material ID, and pick the first match.
+   */
+  async selectMakatFromDropdown(materialIdOrText: string): Promise<void> {
+    console.info(`[selectMakatFromDropdown] Selecting material: ${materialIdOrText}`);
+    try {
+      await this.waitForMakatComboboxReady(30000);
+
+      const isDisabled = await this.makatCombobox.evaluate((el: any) => el.hasAttribute('disabled'));
+      if (isDisabled) {
+        throw new Error(`Combobox is disabled for material ${materialIdOrText}`);
+      }
+
+      console.info(`[selectMakatFromDropdown] Clicking combobox...`);
+      await this.makatCombobox.click({ timeout: 5000, force: false });
+
+      console.info(`[selectMakatFromDropdown] Waiting for dropdown options to appear...`);
+      await this.makatOptions.first().waitFor({ state: 'visible', timeout: 8000 });
+
+      console.info(`[selectMakatFromDropdown] Typing material ID: ${materialIdOrText}`);
       await this.makatCombobox.fill(materialIdOrText);
-      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await this.page.waitForFunction(
+        (selector) => document.querySelectorAll(selector).length > 0,
+        '[role="option"]',
+        { timeout: 6000 }
+      );
 
       const count = await this.makatOptions.count();
       if (count === 0) {
         throw new Error(`No Makat options found for: ${materialIdOrText}`);
       }
-      
+
+      console.info(`[selectMakatFromDropdown] Found ${count} option(s), clicking first one...`);
       await this.makatOptions.first().click({ timeout: 5000 });
+
       console.info(`[selectMakatFromDropdown] Successfully selected: ${materialIdOrText}`);
     } catch (error) {
       console.error(`[selectMakatFromDropdown] Failed for material ${materialIdOrText}: ${error}`);
@@ -148,44 +342,43 @@ export class mainPage {
     }
   }
 
-  /**
-   * Click the add button (plus icon in the start adornment)
-   * 
-   * FLOW: Click the "+" button to add the selected Makat to the table
-   */
-  async clickAddMakatAdornment() {
+  /** Click the "+" start-adornment that adds the currently selected material. */
+  async clickAddMakatAdornment(): Promise<void> {
     await this.addButton.click();
-    await this.waitForNetworkIdle();
   }
 
   /**
-   * Add a material from the dropdown in one operation
-   * 
-   * FLOW:
-   * 1. Check if the material is already visible in the table
-   * 2. If found, skip adding (already added)
-   * 3. If not found, select the material from the dropdown and add it
-   * 
-   * @param materialIdOrText - The material ID to search for (e.g., 'm0000002')
+   * High-level helper: select a Makat from the dropdown and add it to the table.
+   * Skips the operation if the material is already present.
    */
-  async addMakatFromDropdown(materialIdOrText: string) {
+  async addMakatFromDropdown(materialIdOrText: string): Promise<void> {
     console.info(`[addMakatFromDropdown] Checking if material already exists: ${materialIdOrText}`);
     try {
-      // Step 0: Check if material is already in the table
       const alreadyAdded = await this.verifyMaterialIdInRow(materialIdOrText);
       if (alreadyAdded) {
         console.info(`[addMakatFromDropdown] Material ${materialIdOrText} already exists in table, skipping add`);
         return;
       }
-      
+
       console.info(`[addMakatFromDropdown] Material not found, adding: ${materialIdOrText}`);
-      
-      // Step 1: Select from dropdown
-      await this.selectMakatFromDropdown(materialIdOrText);
-      
-      // Step 2: Click add button
+
+      const maxRetries = 3;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          await this.selectMakatFromDropdown(materialIdOrText);
+          break;
+        } catch (error) {
+          if (attempt === maxRetries) throw error;
+          console.warn(`[addMakatFromDropdown] Selection attempt ${attempt} failed, retrying...`);
+          await this.page.reload();
+          await this.waitForPageReady();
+          await this.waitForNetworkIdle();
+        }
+      }
+
       await this.clickAddMakatAdornment();
-      
+      await this.waitForMaterialRow(materialIdOrText);
+
       console.info(`[addMakatFromDropdown] Successfully added material: ${materialIdOrText}`);
     } catch (error) {
       console.error(`[addMakatFromDropdown] Failed to add material ${materialIdOrText}: ${error}`);
@@ -193,181 +386,35 @@ export class mainPage {
     }
   }
 
-  /**
-   * Save material changes
-   * 
-   * FLOW: Click the save button to persist material changes to the database
-   */
-  async saveMaterial() {
-    console.info(`[saveMaterial] Attempting to save material`);
-    try {
-      const saveBtn = this.page.getByTestId('save-button-tooltip-trigger');
-      
-      if (await saveBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await saveBtn.click();
-        await this.waitForNetworkIdle();
-        console.info(`[saveMaterial] Material saved successfully`);
-      } else {
-        console.warn(`[saveMaterial] Save button not visible, attempting anyway`);
-        await saveBtn.click();
-      }
-    } catch (error) {
-      console.error(`[saveMaterial] Failed to save material: ${error}`);
-      throw error;
-    }
+  /** Waits until a row containing the given material ID is rendered. */
+  async waitForMaterialRow(materialId: string, timeout = 15000): Promise<void> {
+    console.info(`[waitForMaterialRow] Waiting for material ${materialId} to appear in table...`);
+    await this.page.waitForFunction(
+      (id) => {
+        const rows = document.querySelectorAll('[data-testid*="content-row"]');
+        return Array.from(rows).some(
+          (row) =>
+            row.getAttribute('data-testid')?.includes(id) ||
+            row.textContent?.includes(id)
+        );
+      },
+      materialId,
+      { timeout }
+    );
+    console.info(`[waitForMaterialRow] Material ${materialId} is now visible in table`);
   }
 
-  /**
-   * Delete a material (makat) from the table
-   * 
-   * FLOW:
-   * 1. Find the delete trigger icon for the material
-   * 2. Click the delete trigger icon to open the delete menu/dialog
-   * 3. Click the delete confirmation button
-   * 4. Wait for the deletion to process
-   * 
-   * @param materialId - The material ID to delete (e.g., '000000001')
-   * @returns Promise<boolean> - True if deletion was successful, false otherwise
-   */
-  async deleteMakat(materialId: string): Promise<boolean> {
-    console.info(`[deleteMakat] Attempting to delete material ${materialId}`);
-    try {
-      // Click the delete trigger icon
-      const deleteIcon = this.page.getByTestId(`row-delete-trigger-icon-${materialId}`);
-      
-      if (await deleteIcon.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await deleteIcon.click();
-        console.log(`[deleteMakat] Delete trigger icon clicked for material ${materialId}`);
-      } else {
-        console.warn(`[deleteMakat] Delete trigger icon not found for material ${materialId}`);
-        return false;
-      }
-
-      // Wait for the confirmation dialog/menu to appear
-      await this.page.waitForTimeout(300);
-
-      // Click the delete confirmation button
-      const deleteConfirmBtn = this.page.getByTestId(`row-delete-current-type-${materialId}`);
-      
-      if (await deleteConfirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-        await deleteConfirmBtn.click();
-        console.log(`[deleteMakat] Delete confirmation button clicked for material ${materialId}`);
-      } else {
-        console.warn(`[deleteMakat] Delete confirmation button not found for material ${materialId}`);
-        return false;
-      }
-
-      // Wait for the deletion to process
-      await this.page.waitForTimeout(500);
-      await this.waitForNetworkIdle();
-      
-      console.info(`[deleteMakat] Material ${materialId} deleted successfully`);
-      return true;
-    } catch (error) {
-      console.error(`[deleteMakat] Failed to delete material ${materialId}: ${error}`);
-      throw error;
-    }
-  }
-
-  /**
-  // ============ Row Expansion ============
-  // Purpose: Expand the hierarchy by clicking network buttons to access leaf-level units
-
-  /**
-   * Step 2: Expand hierarchy to leaf level
-   * 
-   * FLOW:
-   * 1. For each unit ID in the hierarchy path:
-   *    a. Find the cell (row-cell or numbered-cell) for that unit
-   *    b. Hover over the cell to reveal control buttons
-   *    c. Find and click the "network" button to expand
-   * 2. Wait for UI to update after each expansion
-   * 3. Wait for page to settle after all expansions
-   * 4. Return true if hierarchy successfully expanded to leaf level
-   * 
-   * HANDLES:
-   * - row-cell: Used at initial hierarchy level
-   * - numbered-cell: Used after first expansion
-   * 
-   * @param materialId - The material ID (e.g., 'm0000001')
-   * @param unitsToExpand - Array of unit IDs to expand in order (e.g., [2, 12, 52])
-   * @returns Promise<boolean> - True if hierarchy was successfully expanded to leaf level
-   */
-  async expandHierarchyToLeaf(materialId: string, unitsToExpand: number[]): Promise<boolean> {
-    try {
-      let expanded = false;
-      
-      // Expand each unit ID in sequence INCLUDING the leaf unit
-      for (let idx = 0; idx < unitsToExpand.length; idx++) {
-        const unitId = unitsToExpand[idx];
-        
-        // Find the numbered-cell for this unit
-        const cell = this.page.locator(
-          `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
-        ).first();
-        
-        const cellFound = await cell.isVisible({ timeout: 1000 }).catch(() => false);
-        if (!cellFound) continue;
-
-        // Scroll and hover to reveal control buttons
-        await cell.scrollIntoViewIfNeeded();
-        await cell.hover();
-        
-        // Click the network button to expand this unit
-        const networkBtn = this.page.locator(
-          `[data-testid="cell-controls-network-${materialId}-${unitId}"]`
-        ).first();
-
-        if (await networkBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
-          await networkBtn.click();
-          expanded = true;
-        }
-      }
-
-      return expanded;
-    } catch (error) {
-      return false;
-    }
-  }
-
-
-
-
-  // ============ Data Validation ============
-  // Purpose: Verify that materials were successfully added to the table
-
-  /**
-   * Verify that a row contains the expected material ID
-   * 
-   * FLOW:
-   * 1. Get all content rows from the table
-   * 2. For each row:
-   *    a. Check the data-testid attribute for material ID
-   *    b. Check the text content as fallback
-   * 3. Return true if found in any row
-   * 4. Log results for debugging
-   */
+  /** Returns true if any rendered row references the given material ID. */
   async verifyMaterialIdInRow(materialId: string): Promise<boolean> {
     try {
-      // Get all content rows
       const count = await this.contentRows.count();
-
       for (let i = 0; i < count; i++) {
         const row = this.contentRows.nth(i);
-        
-        // Try to get data-testid attribute
         const rowTestId = await row.getAttribute('data-testid').catch(() => null);
-        if (rowTestId && rowTestId.includes(materialId)) {
-          return true;
-        }
-        
-        // Also check row text content as fallback
+        if (rowTestId?.includes(materialId)) return true;
         const rowText = await row.textContent().catch(() => '');
-        if (rowText && rowText.includes(materialId)) {
-          return true;
-        }
+        if (rowText?.includes(materialId)) return true;
       }
-      
       return false;
     } catch (e) {
       console.error('Error verifying material ID in row:', e);
@@ -375,388 +422,31 @@ export class mainPage {
     }
   }
 
-  // ============ Aggregation Test Workflow Functions ============
-  // Purpose: Execute complete test workflow steps for aggregation verification
+  // ──────────────── Cell Value Capture ────────────────
 
   /**
-   * Step 2: Set values at changeable leaf cells (ZERO-CELLS AND INCREMENT GROUP CELLS)
-   * 
-   * IMPORTANT: Only adds values to DIRECT CHILDREN of the LAST unit in unitsToExpand
-   * - If unitsToExpand is [2, 11, 101, 404], only cells that are direct children of 404 are processed
-   * - If unitsToExpand is [2, 11, 101], only cells that are direct children of 101 are processed
-   * - Does NOT add values to children of 2, 11, or any other ancestor units
-   * 
-   * HOW IT WORKS:
-   * - The cell's parent unit is encoded in the row structure (data-testid contains parent unit ID)
-   * - Only cells whose parent is the last unit in unitsToExpand are processed
-   * 
-   * HANDLES TWO SCENARIOS:
-   * 
-   * SCENARIO A - INITIALIZE ZERO-CELLS:
-   * - Zero-cells: CLICKABLE (empty leaf nodes that convert to group cells with value 1)
-   * - Click each zero-cell to initialize it with value 1
-   * 
-   * SCENARIO B - INCREMENT EXISTING GROUP CELLS:
-   * - If no zero-cells found, look for existing numbered-cells (group cells with pre-set values)
-   * - Increment these group cells by the specified incrementValue times
-   * 
-   * @param materialId - The material ID (e.g., 'm0000001')
-   * @param unitsToExpand - Array of unit IDs in hierarchy path, LAST element is the parent unit
-   * @param incrementValue - Number of times to click increment button (e.g., 4 to reach 5 from 1)
-   * @returns Promise<Map<string, number>> - Map of unitId to final set value
+   * Reads the numeric value displayed for a given (materialId, unitId) cell.
+   * Tries the top-level `row-cell-*` first and falls back to `numbered-cell-*`.
+   * Returns 0 when the cell is not present or has no input value.
    */
-  async setLeafCellValues(
-    materialId: string,
-    unitsToExpand: number[],
-    incrementValue: number = 4
-  ): Promise<Map<string, number>> {
-    const setLeafValues: Map<string, number> = new Map();
-
-    try {
-      // Determine which unit is the parent of the cells we want to modify
-      // Strategy: Try the last unit first (it might have children)
-      // If no children found, fall back to second-to-last unit
-      let parentUnitId = unitsToExpand[unitsToExpand.length - 1];
-      const leafUnitId = parentUnitId;
-      
-      console.log(`[setLeafCellValues] Full hierarchy path: ${unitsToExpand.join(' -> ')}`);
-      console.log(`[setLeafCellValues] Trying parent unit: ${parentUnitId}`);
-
-      // ============ FIND THE SUB-ROW CONTAINER ============
-      // Find the sub-row container that holds children cells of the parent unit
-      let subRow = this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`);
-      
-      // Try alternative selector if first doesn't work
-      if (!(await subRow.first().isVisible({ timeout: 500 }).catch(() => false))) {
-        subRow = this.page.locator(`[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`);
-      }
-
-      let isSubRowVisible = await subRow.first().isVisible({ timeout: 500 }).catch(() => false);
-      console.log(`[setLeafCellValues] Sub-row container for parent ${parentUnitId} visible: ${isSubRowVisible}`);
-
-      // If no sub-row found for the leaf unit, try the parent unit
-      if (!isSubRowVisible && unitsToExpand.length > 1) {
-        parentUnitId = unitsToExpand[unitsToExpand.length - 2];
-        console.log(`[setLeafCellValues] No children found under ${leafUnitId}, trying parent unit: ${parentUnitId}`);
-        
-        subRow = this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`);
-        if (!(await subRow.first().isVisible({ timeout: 500 }).catch(() => false))) {
-          subRow = this.page.locator(`[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`);
-        }
-        
-        isSubRowVisible = await subRow.first().isVisible({ timeout: 500 }).catch(() => false);
-        console.log(`[setLeafCellValues] Sub-row container for parent ${parentUnitId} visible: ${isSubRowVisible}`);
-      }
-
-      if (!isSubRowVisible) {
-        console.warn(`[setLeafCellValues] Sub-row container not found for parent unit ${parentUnitId}`);
-        return setLeafValues;
-      }
-
-      // ============ SCENARIO A: INITIALIZE ZERO-CELLS ============
-      // Find zero-cells that are DIRECT CHILDREN of the parent unit
-      const zeroCells = subRow.locator(`[data-testid*="zero-cell-${materialId}-"]`);
-      const zeroCellCount = await zeroCells.count();
-      let clickedZeroCells = false;
-
-      console.log(`[setLeafCellValues] Found ${zeroCellCount} zero-cells under parent ${parentUnitId}`);
-
-      const zeroCellIds: string[] = [];
-      if (zeroCellCount > 0) {
-        for (let i = 0; i < zeroCellCount; i++) {
-          const testId = await zeroCells.nth(i).getAttribute('data-testid');
-          if (testId) {
-            zeroCellIds.push(testId);
-          }
-        }
-
-        console.log(`[setLeafCellValues] Zero-cell IDs found: ${zeroCellIds.join(', ')}`);
-
-        // Click each zero-cell to convert it to group cell (value 1)
-        for (const testId of zeroCellIds) {
-          try {
-            const cell = this.page.locator(`[data-testid="${testId}"]`).first();
-            const unitMatch = testId.match(/zero-cell-[^-]+-(\d+)/);
-            const childUnitId = unitMatch ? unitMatch[1] : 'unknown';
-
-            console.log(`[setLeafCellValues] Clicking zero-cell for child unit ${childUnitId} (child of ${parentUnitId})`);
-            await cell.click();
-            setLeafValues.set(childUnitId, 1);
-            clickedZeroCells = true;
-          } catch (error) {
-            console.warn(`Failed to click zero-cell ${testId}:`, error);
-            continue;
-          }
-        }
-
-        // Wait for page to settle
-        await this.page.waitForLoadState('networkidle').catch(() => {});
-        
-        // Additional wait to ensure numbered cells are rendered after zero-cell clicks
-        if (clickedZeroCells) {
-          console.log(`[setLeafCellValues] Waiting for numbered-cells to render after zero-cell clicks...`);
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-      }
-
-      // ============ SCENARIO B: FIND GROUP CELLS (EXISTING OR NEWLY CREATED) ============
-      // Find numbered-cells that are DIRECT CHILDREN of the parent unit
-      // Look for all numbered-cell elements
-      const numberedCells = subRow.locator(`[data-testid*="numbered-cell"]`);
-      const numberedCellCount = await numberedCells.count();
-
-      console.log(`[setLeafCellValues] Found ${numberedCellCount} numbered-cells under parent ${parentUnitId}`);
-
-      if (numberedCellCount > 0 && incrementValue > 0) {
-        // Extract unit IDs from numbered cells
-        const unitIds: string[] = [];
-        for (let i = 0; i < numberedCellCount; i++) {
-          const testId = await numberedCells.nth(i).getAttribute('data-testid');
-          if (testId && !testId.includes('increment') && !testId.includes('decrement')) {
-            // Extract unit ID from testId (format: numbered-cell-MATERIAL-UNIT-suffix)
-            const unitMatch = testId.match(/numbered-cell-\d+-(\d+)/);
-            if (unitMatch) {
-              const unitId = unitMatch[1];
-              if (!unitIds.includes(unitId)) {
-                unitIds.push(unitId);
-                console.log(`[setLeafCellValues] Found numbered-cell with testId=${testId}, unitId=${unitId}`);
-              }
-            } else {
-              console.log(`[setLeafCellValues] Could not extract unit ID from testId: ${testId}`);
-            }
-          }
-        }
-
-        console.log(`[setLeafCellValues] Unique child unit IDs with numbered-cells: ${unitIds.join(', ')}`);
-
-        const adjustedIncrementValue = clickedZeroCells ? Math.max(0, incrementValue - 1) : incrementValue;
-
-        console.log(`[setLeafCellValues] Incrementing cells by ${adjustedIncrementValue} (adjusted from ${incrementValue})`);
-
-        for (const unitId of unitIds) {
-          try {
-            // Find the numbered-cell container for this unit
-            const numberedCellContainer = subRow.locator(`[data-testid*="numbered-cell"][data-testid*="${unitId}"]`).first();
-            
-            const cellExists = await numberedCellContainer.isVisible({ timeout: 1000 }).catch(() => false);
-            if (!cellExists) {
-              console.log(`[setLeafCellValues] Could not find numbered-cell container for unit ${unitId}`);
-              continue;
-            }
-
-            // Find the increment button - it should be adjacent to or within the numbered-cell
-            let incrementBtn = numberedCellContainer.locator(`[data-testid*="increment"]`).first();
-            
-            // Try alternative selector if not found
-            if (!(await incrementBtn.isVisible({ timeout: 500 }).catch(() => false))) {
-              incrementBtn = this.page.locator(
-                `[data-testid*="numbered-cell"][data-testid*="${unitId}"] [data-testid*="increment"]`
-              ).first();
-            }
-
-            if (await incrementBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-              // Get current value before incrementing
-              const inputField = numberedCellContainer.locator(`[data-testid*="input"]`).first();
-              let currentValue = 0;
-              try {
-                const inputValue = await inputField.inputValue().catch(() => '0');
-                currentValue = parseInt(inputValue || '0', 10);
-              } catch {
-                currentValue = 0;
-              }
-
-              console.log(`[setLeafCellValues] Unit ${unitId}: Current=${currentValue}, incrementing by ${adjustedIncrementValue}`);
-
-              // Click increment button adjustedIncrementValue times
-              for (let i = 0; i < adjustedIncrementValue; i++) {
-                await incrementBtn.click();
-                // Wait briefly between clicks to allow UI to update
-                await new Promise(resolve => setTimeout(resolve, 100));
-              }
-              
-              // Wait for the input field to reflect the new value
-              const expectedFinalValue = currentValue + adjustedIncrementValue;
-              try {
-                await this.page.waitForFunction(() => {
-                  return inputField.inputValue().then(val => {
-                    return parseInt(val || '0', 10) === expectedFinalValue;
-                  });
-                }, { timeout: 2000 });
-              } catch {
-                console.warn(`[setLeafCellValues] Timeout waiting for unit ${unitId} value to update to ${expectedFinalValue}`);
-              }
-              
-              // Read the actual final value from the input field
-              let actualFinalValue = expectedFinalValue;
-              try {
-                const actualInputValue = await inputField.inputValue().catch(() => '0');
-                actualFinalValue = parseInt(actualInputValue || '0', 10);
-              } catch {
-                actualFinalValue = expectedFinalValue;
-              }
-              
-              setLeafValues.set(unitId, actualFinalValue);
-              console.log(`[setLeafCellValues] Unit ${unitId}: Final value = ${actualFinalValue}`);
-            } else {
-              console.warn(`[setLeafCellValues] Increment button not visible for unit ${unitId}`);
-            }
-          } catch (error) {
-            console.warn(`Failed to increment cell for unit ${unitId}:`, error);
-            continue;
-          }
-        }
-      }
-
-      // Wait for page to settle
-      await this.page.waitForLoadState('networkidle').catch(() => {});
-
-      console.log(`[setLeafCellValues] Completed. Set values for ${setLeafValues.size} cells: ${Array.from(setLeafValues.entries()).map(([id, val]) => `${id}=${val}`).join(', ')}`);
-      return setLeafValues;
-    } catch (error) {
-      console.error(`Failed to set leaf cell values:`, error);
-      return setLeafValues;
+  async getCellValue(materialId: string, unitId: number): Promise<number> {
+    let cell = this.rowCell(materialId, unitId);
+    if (!(await cell.first().isVisible({ timeout: 500 }).catch(() => false))) {
+      cell = this.page.locator(`[data-testid*="numbered-cell-${materialId}-${unitId}"]`);
     }
+
+    const inputField = cell.locator('[data-testid*="input"]').first();
+    const raw = await inputField.inputValue().catch(() => '0');
+    return parseInt(raw || '0', 10);
   }
 
   /**
-   * Move a unit to a new parent via the unit-hierarchy drawer UI.
+   * Walks the requested unit path and captures the value of every visible
+   * cell at each level (parents and any rendered children).
    *
-   * FLOW:
-   * 1. Open the unit hierarchy drawer
-   * 2. Expand the new hierarchy path up to (and including) the new parent node
-   * 3. Click the combobox for the new parent to open the unit picker
-   * 4. Select the unit being moved from the dropdown list
-   * 5. Click the combobox action button to stage the move
-   * 6. Click the confirmation-popup trigger
-   * 7. Click the confirm button to commit the move
-   * 8. Press Escape to close the drawer
-   *
-   * @param unitId       - The unit to relocate
-   * @param newParentId  - The target parent unit that will receive the unit
-   * @param newHierarchy - Full ordered path to the new parent (used for drawer expansion)
-   */
-  async unitMoveUI(
-    unitId: number,
-    newParentId: number,
-    newHierarchy: number[]
-  ): Promise<void> {
-    console.info(`[unitMoveUI] Moving unit ${unitId} to parent ${newParentId}`);
-
-    // Open the drawer by clicking menu
-    await this.menuBtn.click();
-    const drawerVisible = await this.unitHierarchyDrawerContent.isVisible({ timeout: 3000 }).catch(() => false);
-    if (!drawerVisible) {
-      throw new Error('Unit Hierarchy Drawer failed to open');
-    }
-    await this.page.waitForTimeout(500);
-
-    // Expand the new hierarchy path down to the new parent node
-    const parentIndex = newHierarchy.indexOf(newParentId);
-    if (parentIndex !== -1) {
-      for (let i = 0; i <= parentIndex; i++) {
-        const currentUnit = newHierarchy[i];
-        const expandTooltip = this.page.locator(`[data-testid="unit-hierarchy-row-expand-tooltip-${currentUnit}-wrapper"]`);
-        const isVisible = await expandTooltip.isVisible({ timeout: 2000 }).catch(() => false);
-        
-        if (isVisible) {
-          await expandTooltip.click();
-          await this.page.waitForTimeout(200);
-        }
-      }
-    }
-
-    // Select the unit from the new parent's combobox
-    const comboboxInput = this.page.locator(
-      `[data-testid="unit-hierarchy-node-combobox-${newParentId}-input"]`
-    );
-    await comboboxInput.click();
-    await this.waitForNetworkIdle();
-
-    // Type the unit ID to search for it in the dropdown
-    await comboboxInput.fill(unitId.toString());
-
-    // Select the unit from the filtered options
-    const unitOption = this.page.locator(
-      `[data-testid="unit-hierarchy-node-combobox-${newParentId}-item-${unitId}"]`
-    );
-    await unitOption.waitFor({ state: 'visible' });
-    await unitOption.click();
-
-    // Stage the move
-    const comboboxActionButton = this.page.locator(
-      `[data-testid="unit-hierarchy-node-combobox-${newParentId}-action-button"]`
-    );
-    await comboboxActionButton.click();
-
-    await this.page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-trigger"]').click();
-    await this.page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-confirm-button"]').click();
-
-
-    // Close the drawer
-    await this.page.keyboard.press('Escape');
-    console.log(`  ✓ unitMoveUI: unit ${unitId} moved to parent ${newParentId}`);
-  }
-
-  /**
-   * Confirm and lock the hierarchy via the drawer UI
-   * 
-   * PURPOSE: Opens the hierarchy drawer, confirms any pending changes,
-   * and closes the drawer to finalize the hierarchy lock.
-   * This triggers the backend to recalculate aggregation values.
-   * 
-   * USAGE:
-   * await hierarchyPage.confirmAndLockHierarchyViaDrawer();
-   */
-  async confirmAndLockHierarchyViaDrawer(): Promise<void> {
-    console.log(`\n[Confirming and locking hierarchy via drawer]`);
-    
-    // Open the drawer
-    console.log(`  Opening drawer...`);
-    await this.page.locator('[data-testid="unit-hierarchy-drawer-trigger"]').click();
-    await this.page.waitForLoadState('networkidle');
-    
-    // Click confirmation trigger
-    console.log(`  Clicking confirmation trigger...`);
-    await this.page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-trigger"]').click();
-    await this.page.waitForLoadState('networkidle');
-    
-    // Confirm the action
-    console.log(`  Confirming the action...`);
-    await this.page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-confirm-button"]').click();
-    await this.page.waitForLoadState('networkidle');
-    
-    // Close the drawer
-    console.log(`  Closing drawer...`);
-    await this.page.keyboard.press('Escape');
-    await this.page.waitForLoadState('networkidle');
-    
-    console.log(`  ✓ Hierarchy confirmed and locked\n`);
-  }
-
-
-  /**
-   * Capture all visible cell values at each level of the expanded hierarchy
-   * 
-   * STEP 1: Capture parent units in the expanded path
-   * - For each unit in unitsToExpand (e.g., [2, 12, 52])
-   * - Find the cell for this unit: try row-cell first, fallback to numbered-cell
-   * - Read the value from the input field
-   * - Store: {unitId: value}
-   * 
-   * STEP 2: Capture children for each parent
-   * - For each parent, find all its visible children in the DOM
-   * - Find the sub-row container that holds children cells
-   * - Extract all numbered-cells within this sub-row
-   * - For each child, extract unit ID and value
-   * - Remember which children belong to each parent
-   * 
-   * STEP 3: Store hierarchy map for verification
-   * - Save the parent→children mapping for use by verifyAggregationWithAllVisibleCells
-   * - Return all captured values: {2: 100, 12: 50, 52: 20, 53: 30, ...}
-   * 
-   * @param materialId - The material/makat ID
-   * @param unitsToExpand - The hierarchy path [parent1, parent2, ..., leaf]
-   * @returns Map of unitId → value for all visible cells at each level
+   * Side-effect: populates {@link _hierarchyMap} with the parent → children
+   * relationship discovered while traversing, so subclasses can perform
+   * aggregation checks against the captured snapshot.
    */
   async captureAllVisibleCellValuesAtEachLevel(
     materialId: string,
@@ -765,277 +455,90 @@ export class mainPage {
     const allCellValues = new Map<number, number>();
     const hierarchyMap = new Map<number, number[]>();
 
-    // ============ STEP 1: Capture parent units in the expanded path ============
+    // Capture each unit on the requested path.
     for (const unitId of unitsToExpand) {
-      // Find the cell for this unit - try row-cell first, fallback to numbered-cell
-      let cell = this.page.locator(`[data-testid="row-cell-${materialId}-${unitId}"]`);
-      if (!(await cell.first().isVisible({ timeout: 500 }).catch(() => false))) {
-        cell = this.page.locator(`[data-testid*="numbered-cell-${materialId}-${unitId}"]`);
-      }
-      
-      // Read the value from the input field
-      const inputField = cell.locator('[data-testid*="input"]').first();
-      const value = parseInt(await inputField.inputValue().catch(() => '0'), 10);
+      const value = await this.getCellValue(materialId, unitId);
       allCellValues.set(unitId, value);
     }
 
-    // ============ STEP 2: Capture children for each parent in the path ============
+    // For each parent on the path, capture all visible numbered children.
     for (const parentUnitId of unitsToExpand) {
-      // Find the sub-row container that holds children cells
-      let subRow = this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`);
-      // Try alternative selector if first doesn't work
-      if (!(await subRow.first().isVisible({ timeout: 500 }).catch(() => false))) {
-        subRow = this.page.locator(`[data-testid="sub-row-cells-${materialId}-${parentUnitId}"]`);
-      }
-      
-      if (await subRow.first().isVisible({ timeout: 500 }).catch(() => false)) {
-        // Extract all numbered-cells within this sub-row
-        const testIds = await subRow.locator(`[data-testid*="numbered-cell-${materialId}-"]`)
-          .evaluateAll((els: any[]) => els.map(e => e.getAttribute('data-testid')).filter(id => id && !id.includes('increment') && !id.includes('decrement')))
+      const subRow = await this.findVisibleSubRow(materialId, parentUnitId);
+
+      if (subRow) {
+        const testIds = await subRow
+          .locator(`[data-testid*="numbered-cell-${materialId}-"]`)
+          .evaluateAll((els: any[]) =>
+            els
+              .map(e => e.getAttribute('data-testid'))
+              .filter((id: string | null) => id && !id.includes('increment') && !id.includes('decrement'))
+          )
           .catch(() => []);
-        
-        // For each child found, extract its unit ID and value
+
         const children: number[] = [];
         for (const testId of testIds) {
-          const match = testId?.match(/numbered-cell-[^-]+-(\d+)/);  // Extract unit ID
+          const match = testId?.match(/numbered-cell-[^-]+-(\d+)/);
           if (match) {
-            const unitId = parseInt(match[1], 10);
-            // Skip if it's the parent itself or already added
-            if (unitId !== parentUnitId && !children.includes(unitId)) {
-              children.push(unitId);
-              // Get the child's value and store it
-              const val = parseInt(
-                await this.page.locator(`[data-testid="${testId}"]`).locator('[data-testid*="input"]').first().inputValue().catch(() => '0'),
-                10
-              );
-              allCellValues.set(unitId, val);
+            const childUnitId = parseInt(match[1], 10);
+            if (childUnitId !== parentUnitId && !children.includes(childUnitId)) {
+              children.push(childUnitId);
+              const val = await this.getCellValue(materialId, childUnitId);
+              allCellValues.set(childUnitId, val);
             }
           }
         }
-        // Remember which children belong to this parent
         hierarchyMap.set(parentUnitId, children);
       } else {
         hierarchyMap.set(parentUnitId, []);
       }
     }
 
-    // ============ STEP 3: Store hierarchy map for verification ============
-    (this as any)._hierarchyMap = hierarchyMap;
+    this._hierarchyMap = hierarchyMap;
     return allCellValues;
   }
 
-  /**
-   * Verify that parent values equal the sum of their visible children
-   * 
-   * AGGREGATION RULE: Parent cell value = SUM(all visible child cell values)
-   * 
-   * STEP 1: Get parent value and its children
-   * - For each parent unit in the expanded path
-   * - Get the parent's cell value from allVisibleValues
-   * - Get the list of visible children from hierarchyMap
-   * 
-   * STEP 2: Sum the children values
-   * - For each child of this parent
-   * - Add the child's value to the running sum
-   * 
-   * STEP 3: Compare parent === sum(children)
-   * - Check if parent value equals the sum of all children values
-   * - Log result: ✓ if equal, ✗ if not equal
-   * - Return false if ANY parent fails the check
-   * 
-   * EXAMPLE:
-   * Unit 2 (parent) = 50
-   *   └─ Unit 12 (parent) = 50
-   *       ├─ Unit 52 (child) = 20
-   *       └─ Unit 53 (child) = 30
-   * 
-   * Verification:
-   * ✓ Unit 2: 50 === 50 (sum of [12])
-   * ✓ Unit 12: 50 === 50 (20 + 30)
-   * 
-   * @param materialId - The material/makat ID
-   * @param unitsToExpand - The hierarchy path that was expanded
-   * @param allVisibleValues - Map of all captured unitId → value pairs
-   * @returns boolean - True if all parent-child aggregations are valid, false otherwise
-   */
-  async verifyAggregationWithAllVisibleCells(
-    materialId: string,
-    unitsToExpand: number[],
-    allVisibleValues: Map<number, number>
-  ): Promise<boolean> {
-    // Retrieve the hierarchy map that was stored during capture phase
-    const hierarchyMap: Map<number, number[]> = (this as any)._hierarchyMap || new Map();
-    let allChecksPass = true;
-
-    console.log(`\n[AGGREGATION VERIFICATION]`);
-    
-    // For each parent in the expanded path
-    for (const parentUnitId of unitsToExpand) {
-      // STEP 1: Get parent value and its children
-      const parentValue = allVisibleValues.get(parentUnitId) ?? 0;
-      const children = hierarchyMap.get(parentUnitId) || [];
-      
-      // Skip if this parent has no children (it's a leaf)
-      if (children.length === 0) continue;
-
-      // STEP 2: Sum all children values
-      let childrenSum = 0;
-      for (const childId of children) {
-        childrenSum += allVisibleValues.get(childId) ?? 0;
-      }
-
-      // STEP 3: Compare parent === sum(children)
-      const isPassed = parentValue === childrenSum;
-      const status = isPassed ? '✓' : '✗';
-      console.log(`  ${status} Unit ${parentUnitId}: ${parentValue} ${isPassed ? '===' : '≠'} ${childrenSum}`);
-      
-      if (!isPassed) allChecksPass = false;
-    }
-
-    return allChecksPass;
-  }
+  // ──────────────── Hierarchy Navigation ────────────────
 
   /**
-   * Open comment dialog for a specific row (material)
-   * 
-   * FLOW: Click the row-comment-dialog trigger button to open the comment dialog
-   * 
-   * @param materialId - The material ID to add comment for
-   * @returns true if dialog opened successfully
+   * Recursively expands the unit hierarchy tree until every visible branch
+   * reaches a leaf node (i.e. no more collapsed/expandable nodes remain).
+   *
+   * A node is considered expandable if it exposes an aria-expanded="false"
+   * attribute or a generic expand/toggle test-id.
+   *
+   * @param maxDepth Safety guard against infinite recursion (default: 20).
    */
-  async openCommentDialog(materialId: string): Promise<boolean> {
-    try {
-      // Find the trigger button for this material's comment dialog
-      // Format: row-comment-dialog-{materialId}-trigger
-      const commentTrigger = this.page.getByTestId(`row-comment-dialog-${materialId}-trigger`);
-      
-      if (await commentTrigger.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await commentTrigger.click();
-        await this.page.waitForLoadState('networkidle');
-        console.log(`✓ Comment dialog opened for material ${materialId}`);
-        return true;
-      } else {
-        console.warn(`Comment trigger not visible for material ${materialId}`);
-        return false;
-      }
-    } catch (error) {
-      console.error(`Failed to open comment dialog: ${error}`);
-      return false;
+  async expandToLeaf(maxDepth: number = 20): Promise<void> {
+    if (maxDepth <= 0) {
+      console.warn(`[expandToLeaf] Max recursion depth reached, stopping.`);
+      return;
     }
-  }
 
-  /**
-   * Add a comment to a material row
-   * 
-   * FLOW: Type comment in the comment text area and save
-   * 
-   * @param materialId - The material ID to add comment for
-   * @param commentText - The comment text to add
-   * @returns true if comment was added successfully
-   */
-  async addCommentToMaterial(materialId: string, commentText: string): Promise<boolean> {
-    try {
-      // Format: row-comment-content-{materialId}
-      const commentInput = this.page.getByTestId(`row-comment-content-${materialId}`);
-      
-      if (await commentInput.isVisible({ timeout: 3000 }).catch(() => false)) {
-        // Clear any existing text
-        await commentInput.fill('');
-        // Type the new comment
-        await commentInput.fill(commentText);
-        console.log(`✓ Comment text entered for material ${materialId}: "${commentText}"`);
-        return true;
-      } else {
-        console.warn(`Comment input not visible for material ${materialId}`);
-        return false;
-      }
-    } catch (error) {
-      console.error(`Failed to add comment: ${error}`);
-      return false;
+    const collapsedNodes = this.page.locator(
+      '[aria-expanded="false"], [data-testid*="expand-trigger"], [data-testid*="toggle-expand"]'
+    );
+
+    const count = await collapsedNodes.count().catch(() => 0);
+    if (count === 0) {
+      console.info(`[expandToLeaf] No more collapsed nodes – fully expanded.`);
+      return;
     }
-  }
 
-  /**
-   * Save comment and close the comment dialog
-   * 
-   * FLOW: Click the save button to persist the comment
-   * 
-   * @param materialId - The material ID to save comment for
-   * @returns true if comment was saved successfully
-   */
-  async saveComment(materialId: string): Promise<boolean> {
-    try {
-      // Format: row-comment-save-{materialId}
-      const saveBtn = this.page.getByTestId(`row-comment-save-${materialId}`);
-      
-      if (await saveBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await saveBtn.click();
-        await this.waitForNetworkIdle();
-        console.log(`✓ Comment saved for material ${materialId}`);
-        return true;
-      } else {
-        console.warn(`Save button not visible for material ${materialId}`);
-        return false;
+    console.info(`[expandToLeaf] Expanding ${count} node(s) at depth ${21 - maxDepth}`);
+
+    for (let i = 0; i < count; i++) {
+      const node = collapsedNodes.nth(i);
+      try {
+        if (await node.isVisible({ timeout: 500 }).catch(() => false)) {
+          await node.click({ timeout: 2_000 }).catch(() => {});
+        }
+      } catch {
+        // Node may have been replaced by re-render – ignore and continue.
       }
-    } catch (error) {
-      console.error(`Failed to save comment: ${error}`);
-      return false;
     }
-  }
 
-  /**
-   * Close comment dialog by pressing Escape
-   * 
-   * FLOW: Press Escape to close the comment dialog
-   * 
-   * @returns true if dialog was closed successfully
-   */
-  async closeCommentDialog(): Promise<boolean> {
-    try {
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(500); // Small delay for dialog to close
-      console.log('✓ Comment dialog closed');
-      return true;
-    } catch (error) {
-      console.error(`Failed to close comment dialog: ${error}`);
-      return false;
-    }
-  }
-
-  /**
-   * Verify that a comment was saved for a material
-   * 
-   * FLOW: Open the comment dialog and check if the comment text is present
-   * 
-   * @param materialId - The material ID to check
-   * @param expectedCommentText - The expected comment text
-   * @returns true if comment is present and matches expected text
-   */
-  async verifyCommentExists(materialId: string, expectedCommentText: string): Promise<boolean> {
-    try {
-      // Open the comment dialog
-      const dialogOpened = await this.openCommentDialog(materialId);
-      if (!dialogOpened) {
-        console.warn(`Could not open comment dialog for verification`);
-        return false;
-      }
-
-      // Get the comment input and check its value
-      const commentInput = this.page.getByTestId(`row-comment-content-${materialId}`);
-      const commentValue = await commentInput.inputValue();
-      
-      if (commentValue && commentValue.includes(expectedCommentText)) {
-        console.log(`✓ Comment verified for material ${materialId}: "${commentValue}"`);
-        await this.closeCommentDialog();
-        return true;
-      } else {
-        console.warn(`Comment not found or does not match. Found: "${commentValue}"`);
-        await this.closeCommentDialog();
-        return false;
-      }
-    } catch (error) {
-      console.error(`Failed to verify comment: ${error}`);
-      return false;
-    }
+    await this.waitForNetworkIdle();
+    // Recurse to expand any newly revealed children.
+    await this.expandToLeaf(maxDepth - 1);
   }
 }

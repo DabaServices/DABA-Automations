@@ -74,7 +74,7 @@ export interface Transaction {
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE_URL = 'http://162.55.55.124:3000';
+const API_BASE_URL = 'http://localhost:3000'; //http://dev.162.55.55.124.nip.io/
 
 // ── Flat hierarchy cache ──────────────────────────────────────────────────────
 // We fetch the full flat unit list once per ensureTestHierarchy call and cache

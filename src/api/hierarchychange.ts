@@ -7,7 +7,7 @@ import { APIRequestContext } from '@playwright/test';
  * Moves a unit from one parent to another in the hierarchy tree.
  */
 
-const API_BASE_URL = 'http://162.55.55.124:3000'; //http://localhost:3000
+const API_BASE_URL = 'http://localhost:3000'; //http://dev.162.55.55.124.nip.io/   http://localhost:3000
 
 /**
  * Get today's date in YYYY-MM-DD format

@@ -3,8 +3,7 @@
     {
       "index": 0,
       "materialId": "000000001",
-      "description": "Material 1 - Basic Validation",
-      "unitsToExpand": []
+      "description": "Material 1 - Basic Validation"
     }
   ],
   "hierarchyExpansionTestData": [
@@ -34,15 +33,13 @@
       "materialId": "000000005",
       "description": "Add Comment to Material Test",
       "commentText": "This is a test comment added via smoke test",
-      "rowIndex": 0,
-      "unitsToExpand": []
+      "rowIndex": 0
     }
   ],
   "deleteMakatTestData": [
     {
       "materialId": "000000002",
-      "description": "Delete Material from Table Test",
-      "unitsToExpand": []
+      "description": "Delete Material from Table Test"
     }
   ]
 }

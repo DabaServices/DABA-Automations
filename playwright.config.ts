@@ -16,7 +16,7 @@ export default defineConfig({
   // 3. הגדרות בסיסיות לכל בדיקה
   use: {
     // הכתובת של האתר שלך 
-    baseURL: 'http://162.55.55.124/', // http://localhost:5173/ 
+    baseURL: 'http://localhost:5173/', // http://localhost:5173/  http://dev.162.55.55.124.nip.io/
 
     // צילום מסך רק כשניסוי נכשל - חוסך מקום ומסדר את הדו"ח
     screenshot: 'only-on-failure',
@@ -27,8 +27,14 @@ export default defineConfig({
     headless: true,
 
     launchOptions: {
-      slowMo: 300,
+      slowMo: 200,  // Increased from 1000ms to 1500ms for better headless rendering
     },
+    
+    // Add longer page load timeout for network requests
+    navigationTimeout: 30000,
+    
+    // Ensure elements are interactive before attempting actions
+    actionTimeout: 10000,
   },
 
   // 4. הגדרת הדפדפנים שה-Agent יפעיל

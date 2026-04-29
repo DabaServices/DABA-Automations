@@ -40,6 +40,15 @@
       "unitToMove": 401,
       "newParentUnit": 3,
       "oldParentUnit": 101
+    }, {
+      "materialId": "000000001",
+      "description": "Old Hierarchy Aggregation - Move Unit 401 from Parent 101 to Parent 3",
+      "hatunit": 1,
+      "unitsToExpand": [3, 401],
+      "newHierarchy": [2, 11, 101, 401],
+      "unitToMove": 401,
+      "newParentUnit": 101,
+      "oldParentUnit": 3
     }
   ]
 }

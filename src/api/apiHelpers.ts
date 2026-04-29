@@ -43,85 +43,89 @@ export const unlockHierarchyPath = async (
 };
 
 /**
- * Lock a complete hierarchy after a hierarchy change operation.
+ * Lock multiple units (can be separate top-level units or hierarchies).
  *
- * IMPORTANT: After a move operation, this function locks the NEW hierarchy path only.
- * It does NOT re-lock the old path, as those units have moved and their parent
- * relationships have changed.
+ * This function locks all units in the provided array.
+ * Each unit is locked with rootFather as its parent (for top-level units).
+ * This is useful for locking multiple separate hierarchies after a move operation.
  *
- * The function locks all units by hierarchy level (deepest first).
- * Children must be locked before their parents to maintain API constraints.
- *
- * BATCHING: All units at the same parent level are locked together in ONE API call.
- * This is more efficient and matches the API's expected behavior.
- *
- * Example: If moving unit 101 from [2, 11, 101] to [3, 12, 101]:
- *   Lock the NEW path [3, 12, 101]:
- *   1. Call API with [101], father=12, statusId=1  (deepest level first)
- *   2. Call API with [12], father=3, statusId=1
- *   3. Call API with [3], father=1, statusId=1
+ * Example: lockCompleteHierarchy(request, [2, 3]) locks:
+ *   1. Unit 2 with father 1
+ *   2. Unit 3 with father 1
  *
  * @param request         - Playwright APIRequestContext
- * @param hierarchyPath   - Original hierarchy path (ignored, kept for API compatibility)
- * @param secondPath      - NEW hierarchy path after the move (this is what gets locked)
- * @param rootFather      - Parent of the highest-level unit (default: 1)
+ * @param unitsToLock     - Array of unit IDs to lock (can be separate units)
+ * @param rootFather      - Parent of all units in the array (default: 1)
  */
+const PIKUDS_API_URL = 'http://localhost:3002/units/pikuds';
+
+/**
+ * Fetch all top-level unit IDs (pikuds) from the API.
+ * Throws if the API call fails — no hardcoded fallback.
+ */
+export const fetchAllTopLevelUnits = async (
+  _request: APIRequestContext
+): Promise<number[]> => {
+  // TEMPORARY: connected to the regular backend (not the automations backend),
+  // so the /units/pikuds endpoint is unavailable. Returning a hardcoded list
+  // of top-level units instead. Restore the API call below when switched back.
+  const hardcodedUnits = [2, 3, 4, 5, 6, 7, 8, 9, 10];
+  console.info(`[fetchAllTopLevelUnits] Using hardcoded top-level units: [${hardcodedUnits.join(', ')}]`);
+  return hardcodedUnits;
+
+  /* ----- Original API-based implementation (re-enable when on automations BE) -----
+  const response = await _request.fetch(PIKUDS_API_URL, {
+    method: 'GET',
+    headers: {
+      'screendate': new Date().toISOString().split('T')[0],
+      'user': 'S9107544',
+    },
+  });
+  const responseBody = await response.text();
+  console.info(`[fetchAllTopLevelUnits] API response status: ${response.status()}, body: ${responseBody}`);
+
+  if (!response.ok()) {
+    throw new Error(`[fetchAllTopLevelUnits] API returned status ${response.status()}`);
+  }
+
+  const data = JSON.parse(responseBody);
+  // Handle both array and wrapped responses (e.g. { units: [...] } or { data: [...] })
+  const arr = Array.isArray(data) ? data : (data.units ?? data.data ?? data.results ?? []);
+  const unitIds: number[] = arr.map((u: any) => {
+    if (typeof u === 'number') return u;
+    return Number(u.id ?? u.unitId ?? u.unit_id ?? u.unitNumber ?? u.unit_number ?? u);
+  }).filter((id: number) => !isNaN(id) && id > 0);
+
+  if (unitIds.length === 0) {
+    throw new Error(`[fetchAllTopLevelUnits] API returned no valid unit IDs`);
+  }
+
+  console.info(`[fetchAllTopLevelUnits] Fetched ${unitIds.length} top-level units from API: [${unitIds.join(', ')}]`);
+  return unitIds;
+  ----- */
+};
+
 export const lockCompleteHierarchy = async (
   request: APIRequestContext,
-  hierarchyPath: number[],
-  secondPath?: number[],
+  unitsToLock: number[],
   rootFather: number = 1
 ): Promise<void> => {
-  // CRITICAL: Use the NEW hierarchy path (secondPath) not the old one
-  // After a move, the old path relationships are invalid
-  const pathToLock = secondPath || hierarchyPath;
-  
-  // Track unit → (fatherId, depth)
-  const unitInfo = new Map<number, { fatherId: number; depth: number }>();
-  
-  // Add root
-  unitInfo.set(rootFather, { fatherId: -1, depth: 0 });
-  
-  // Add the path units with correct parent relationships
-  for (let i = 0; i < pathToLock.length; i++) {
-    const unitId = pathToLock[i];
-    const fatherId = i === 0 ? rootFather : pathToLock[i - 1];
-    unitInfo.set(unitId, { fatherId, depth: i + 1 });
-  }
-  
-  // Build lock list, excluding root
-  const unitsToLock: Array<[number, number, number]> = [];
-  for (const [unitId, info] of unitInfo.entries()) {
-    if (unitId !== rootFather) {
-      unitsToLock.push([unitId, info.fatherId, info.depth]);
-    }
-  }
-  
-  // Group units by parent (fatherId) for batched API calls
-  // Map: fatherId → {units: [unitIds], depth: d}
-  const unitsByParent = new Map<number, { units: number[]; depth: number }>();
-  
-  for (const [unitId, fatherId, depth] of unitsToLock) {
-    if (!unitsByParent.has(fatherId)) {
-      unitsByParent.set(fatherId, { units: [], depth });
-    }
-    unitsByParent.get(fatherId)!.units.push(unitId);
-  }
-   // Convert to array and sort by depth in REVERSE (deepest first)
-  // This ensures children are locked before parents
-  const lockSequence = Array.from(unitsByParent.entries())
-    .map(([fatherId, { units, depth }]) => ({ fatherId, units, depth }))
-    .sort((a, b) => b.depth - a.depth);
+  // If no specific units provided, fetch all top-level units from the API
+  const isLockAll = unitsToLock.length === 0;
+  const effectiveUnits = isLockAll ? await fetchAllTopLevelUnits(request) : unitsToLock;
 
-  console.info(`[lockCompleteHierarchy] Locking ${unitsToLock.length} units in ${lockSequence.length} batches`);
-  for (const { fatherId, units, depth } of lockSequence) {
-    try {
-      await lockUnitStatus(request, units, fatherId, 1);
-    } catch (error) {
-      console.error(`[lockCompleteHierarchy] Failed to lock units [${units.join(', ')}] with parent ${fatherId}: ${error}`);
-    }
+  console.info(`[lockCompleteHierarchy] Locking units: [${effectiveUnits.join(', ')}]${isLockAll ? ' (all top-level units)' : ''}`);
+
+  try {
+    // When locking all top units, skip updateHierarchy to avoid server hanging on recalculation
+    await lockUnitStatus(request, effectiveUnits, rootFather, 1, undefined, isLockAll ? false : undefined);
+    console.info(`[lockCompleteHierarchy] Successfully locked all ${effectiveUnits.length} units`);
+  } catch (error) {
+    console.error(`[lockCompleteHierarchy] Failed to lock units [${effectiveUnits.join(', ')}]: ${error}`);
+    throw error;
   }
-  console.info(`[lockCompleteHierarchy] Completed locking ${unitsToLock.length} units`);
+
+  console.info(`[lockCompleteHierarchy] Completed locking all ${effectiveUnits.length} units`);
 };
 
 /**

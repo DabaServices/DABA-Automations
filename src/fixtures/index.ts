@@ -1,5 +1,5 @@
 import { test as base } from '@playwright/test';
-import { mainPage } from '../pages/mainPage';
+import { ShechelPage } from '../pages/ShechelPage';
 import { ensureTestHierarchy, buildHierarchyFromPath } from '../api/hierarchyCheck';
 import { lockCompleteHierarchy } from '../api/apiHelpers';
 import aggregationData from '../testData/aggregationData.json';
@@ -28,107 +28,36 @@ interface TestSetupData {
 
 const setupByTitle = new Map<string, TestSetupData>();
 
-// ── Hierarchy-change tests: required starting path = originalHierarchy (unitsToExpand) ──
-// Also pass the newHierarchy prefix so the destination parent chain is verified too.
-for (const entry of aggregationData.test_hierarchicalChangeValuePreservation) {
-  const prefixEnd = entry.newHierarchy.indexOf(entry.unitToMove);
-  setupByTitle.set(
-    `test_hierarchicalChangeValuePreservation[${entry.description}]`,
-    {
-      requiredHierarchy: entry.unitsToExpand,
-      newHierarchyPrefix: prefixEnd > 0 ? entry.newHierarchy.slice(0, prefixEnd) : undefined,
-    }
-  );
-}
-for (const entry of aggregationData.test_hierarchicalChangeAggregation) {
-  const prefixEnd = entry.newHierarchy.indexOf(entry.unitToMove);
-  setupByTitle.set(
-    `test_hierarchicalChangeAggregation[${entry.description}]`,
-    {
-      requiredHierarchy: entry.unitsToExpand,
-      newHierarchyPrefix: prefixEnd > 0 ? entry.newHierarchy.slice(0, prefixEnd) : undefined,
-    }
-  );
-}
-for (const entry of aggregationData.test_hierarchicalChangeOldHierarchyAggregation) {
-  const prefixEnd = entry.newHierarchy.indexOf(entry.unitToMove);
-  setupByTitle.set(
-    `test_hierarchicalChangeOldHierarchyAggregation[${entry.description}]`,
-    {
-      requiredHierarchy: entry.unitsToExpand,
-      newHierarchyPrefix: prefixEnd > 0 ? entry.newHierarchy.slice(0, prefixEnd) : undefined,
-    }
-  );
-}
+// ── Auto-register all datasets from all data files ──────────────────────────
+// Each entry must have `description` and `unitsToExpand`.
+// If it also has `newHierarchy` + `unitToMove`, the destination prefix is computed.
+const allDataSources: Record<string, unknown> = {
+  ...aggregationData,
+  ...smokeData,
+};
 
-// ── Aggregation tests ────────────────────────────────────────────────────────
-for (const entry of aggregationData.hierarchicalAggregationTestData) {
-  setupByTitle.set(
-    `test_aggregationVerification[${entry.description}]`,
-    { requiredHierarchy: entry.unitsToExpand }
-  );
-}
+for (const [dataSetName, entries] of Object.entries(allDataSources)) {
+  if (!Array.isArray(entries)) continue;
+  for (const entry of entries) {
+    if (!entry.description) continue;
 
-// ── Smoke tests ──────────────────────────────────────────────────────────────
-for (const entry of smokeData.hierarchyExpansionTestData) {
-  setupByTitle.set(
-    `smoke_hierarchyExpansion[${entry.description}]`,
-    { requiredHierarchy: entry.unitsToExpand }
-  );
-}
-for (const entry of smokeData.leafCellClickabilityTestData) {
-  setupByTitle.set(
-    `smoke_leafCellClickability[${entry.description}]`,
-    { requiredHierarchy: entry.unitsToExpand }
-  );
-}
-for (const entry of smokeData.saveFunctionalityTestData) {
-  setupByTitle.set(
-    `smoke_saveFunctionality[${entry.description}]`,
-    { requiredHierarchy: entry.unitsToExpand }
-  );
-}
-for (const entry of smokeData.makatValidationTestData) {
-  setupByTitle.set(
-    `smoke_makatValidation[${entry.description}]`,
-    { requiredHierarchy: entry.unitsToExpand }
-  );
-}
-for (const entry of smokeData.commentFunctionalityTestData) {
-  setupByTitle.set(
-    `smoke_commentFunctionality[${entry.description}]`,
-    { requiredHierarchy: entry.unitsToExpand }
-  );
+    let newHierarchyPrefix: number[] | undefined;
+    if (entry.newHierarchy && entry.unitToMove !== undefined) {
+      const prefixEnd = entry.newHierarchy.indexOf(entry.unitToMove);
+      newHierarchyPrefix = prefixEnd > 0 ? entry.newHierarchy.slice(0, prefixEnd) : undefined;
+    }
+
+    setupByTitle.set(
+      `${dataSetName}[${entry.description}]`,
+      { requiredHierarchy: entry.unitsToExpand || [], newHierarchyPrefix }
+    );
+  }
 }
 
 // ============ Extend Playwright Test with Custom Fixtures ============
 
 export const test = base.extend<{
-  hierarchyPage: mainPage;
-  committeesPage: mainPage;
-  setStartHierarchy: () => Promise<void>;
-  ensureHierarchy: (expectedHierarchy: Record<number, number[]>) => Promise<boolean>;
-  /**
-   * FIXTURE: prepareHierarchy
-   *
-   * PURPOSE: Ensure the hierarchy is in the correct starting state before
-   * a hierarchical-change test runs.
-   *
-   * Wraps `ensureHierarchyBeforeMove` so tests never need to call setup
-   * logic manually – they simply destructure this fixture and call it with
-   * the test's own data.
-   *
-   * USAGE:
-   * test('my test', async ({ hierarchyPage, prepareHierarchy }) => {
-   *   await prepareHierarchy(originalHierarchy, newHierarchy, unitToMove);
-   *   // Hierarchy is now guaranteed to be in the correct starting state
-   * });
-   */
-  prepareHierarchy: (
-    originalHierarchy: number[],
-    newHierarchy: number[],
-    unitToMove: number
-  ) => Promise<void>;
+  hierarchyPage: ShechelPage;
 }>({
   
   /**
@@ -146,102 +75,12 @@ export const test = base.extend<{
    */
   hierarchyPage: async ({ page }, use) => {
     // Setup: Create mainPage instance
-    const hierarchyPage = new mainPage(page);
+    const hierarchyPage = new ShechelPage(page);
     
     // Provide to test
     await use(hierarchyPage);
     
     // Teardown: (if needed)
-  },
-
-  /**
-   * FIXTURE: committeesPage (DEPRECATED - use hierarchyPage instead)
-   * 
-   * PURPOSE: Backward compatibility alias for hierarchyPage
-   * 
-   * Provided for old test files that use `committeesPage` fixture name.
-   * New test files should use `hierarchyPage` instead.
-   */
-  committeesPage: async ({ hierarchyPage }, use) => {
-    await use(hierarchyPage);
-  },
-
-  /**
-   * FIXTURE: setStartHierarchy
-   * 
-   * PURPOSE: Set up the initial hierarchy state before running hierarchical change tests
-   * 
-   * USAGE:
-   * test('hierarchical change test', async ({ hierarchyPage, setStartHierarchy }) => {
-   *   await setStartHierarchy();
-   *   // Now test can proceed with hierarchical changes
-   * });
-   */
-  setStartHierarchy: async ({ hierarchyPage }, use) => {
-    // Setup: Initialize function (implementation added later)
-    const setUpHierarchy = async () => {
-      // TODO: Implement hierarchy setup logic
-    };
-    
-    // Provide to test
-    await use(setUpHierarchy);
-    
-    // Teardown: (if needed)
-  },
-
-  /**
-   * FIXTURE: ensureHierarchy
-   * 
-   * PURPOSE: Validate the current unit hierarchy in the system and correct it if needed
-   * 
-   * FLOW:
-   * 1. Gets the current hierarchy from the Unit Hierarchy Drawer
-   * 2. Compares it with the expected hierarchy provided
-   * 3. If they don't match, moves units to match the expected hierarchy
-   * 4. Returns true if hierarchy matches, false if corrections were needed
-   * 
-   * USAGE:
-   * test('my test', async ({ hierarchyPage, ensureHierarchy }) => {
-   *   const isCorrect = await ensureHierarchy({
-   *     2: [12, 22, 32, 42],
-   *     12: [52, 92, 132, 172],
-   *     52: [202, 352],
-   *   });
-   *   
-   *   if (!isCorrect) {
-   *     console.log('Hierarchy was corrected');
-   *   }
-   * });
-   */
-  ensureHierarchy: async ({ hierarchyPage }, use) => {
-    const ensureHierarchyFn = async (expectedHierarchy: Record<number, number[]>): Promise<boolean> => {
-      // TODO: implement once the following methods are added to mainPage:
-      //   openUnitHierarchyDrawer()
-      //   getCurrentHierarchyFromDrawer()
-      //   compareHierarchies(current, expected)
-      //   correctHierarchy(current, expected)
-      console.warn('[ensureHierarchy] Not yet implemented – returning false');
-      return false;
-    };
-
-    await use(ensureHierarchyFn);
-  },
-
-  /**
-   * FIXTURE: prepareHierarchy
-   * PURPOSE: Ensure the hierarchy is in the correct starting state before
-   * a hierarchical-change test runs.
-   */
-  prepareHierarchy: async ({ request }, use) => {
-    const prepare = async (
-      originalHierarchy: number[],
-      newHierarchy: number[],
-      unitToMove: number
-    ): Promise<void> => {
-      await ensureTestHierarchy(request, buildHierarchyFromPath(originalHierarchy));
-    };
-
-    await use(prepare);
   },
 
 });
@@ -267,32 +106,68 @@ test.beforeEach(async ({ hierarchyPage, request }) => {
     const { requiredHierarchy, newHierarchyPrefix } = setup;
 
     // Step 1: ensure the starting path (unitsToExpand / old hierarchy)
-    console.log(`\n[beforeEach] Ensuring old hierarchy [${requiredHierarchy.join(' → ')}] for: ${title}`);
-    await ensureTestHierarchy(request, buildHierarchyFromPath(requiredHierarchy));
-    console.log(`[beforeEach] Old hierarchy verified ✓`);
+    if (requiredHierarchy.length > 0) {
+      console.log(`\n[beforeEach] Ensuring old hierarchy [${requiredHierarchy.join(' → ')}] for: ${title}`);
+      try {
+        await ensureTestHierarchy(request, buildHierarchyFromPath(requiredHierarchy));
+        console.log(`[beforeEach] Old hierarchy verified ✓`);
+      } catch (error) {
+        console.error(`[beforeEach] Failed to ensure old hierarchy: ${error}`);
+        throw new Error(`[beforeEach] Hierarchy setup failed for "${title}". The required hierarchy [${requiredHierarchy.join(' → ')}] could not be established. This may be caused by a previous test leaving the system in an unexpected state.`);
+      }
+    }
 
     // Step 2: if a newHierarchy exists, also ensure the destination parent chain
     if (newHierarchyPrefix && newHierarchyPrefix.length > 0) {
       console.log(`[beforeEach] Ensuring destination parent chain [${newHierarchyPrefix.join(' → ')}]`);
-      await ensureTestHierarchy(request, buildHierarchyFromPath(newHierarchyPrefix));
-      console.log(`[beforeEach] Destination parent chain verified ✓`);
+      try {
+        await ensureTestHierarchy(request, buildHierarchyFromPath(newHierarchyPrefix));
+        console.log(`[beforeEach] Destination parent chain verified ✓`);
+      } catch (error) {
+        console.error(`[beforeEach] Failed to ensure destination parent chain: ${error}`);
+        throw new Error(`[beforeEach] Destination hierarchy setup failed for "${title}". Chain [${newHierarchyPrefix.join(' → ')}] could not be established.`);
+      }
     }
 
-    // Step 3: lock and navigate
-    // await hierarchyPage.goto();
-    // await hierarchyPage.page.waitForLoadState('networkidle');
-    // await hierarchyPage.confirmAndLockHierarchyViaDrawer();
-    // console.log(`[beforeEach] Hierarchy locked via drawer ✓`);
-
-    // ALTERNATIVE Step 3: lock using API instead of UI drawer (commented out)
-    const topLevelUnit = requiredHierarchy[0];
-    await lockCompleteHierarchy(request, [topLevelUnit]);
-    await hierarchyPage.goto();
-    await hierarchyPage.page.waitForLoadState('networkidle');
-    console.log(`[beforeEach] Hierarchy locked via API ✓`);
+    // Step 3: lock via API — if no specific units, lock all; otherwise lock top-level units
+    const unitsToLock = new Set<number>();
+    if (requiredHierarchy.length > 0) {
+      unitsToLock.add(requiredHierarchy[0]);
+    }
+    if (newHierarchyPrefix && newHierarchyPrefix.length > 0) {
+      unitsToLock.add(newHierarchyPrefix[0]);
+    }
+    if (unitsToLock.size > 0) {
+      await lockCompleteHierarchy(request, [...unitsToLock]);
+      console.log(`[beforeEach] Hierarchy locked via API for units [${[...unitsToLock].join(', ')}] ✓`);
+    } else {
+      // No specific hierarchy — lock all units
+      console.log(`[beforeEach] No specific hierarchy path, locking all units...`);
+      await lockCompleteHierarchy(request, []);
+      console.log(`[beforeEach] All units locked via API ✓`);
+    }
   } else {
-    // No hierarchy setup needed (e.g. sanity test) – just navigate
-    await hierarchyPage.goto();
+    // No setup entry found for this test — lock all units as a safe default
+    console.log(`[beforeEach] No setup entry for "${title}", locking all units...`);
+    await lockCompleteHierarchy(request, []);
+    console.log(`[beforeEach] All units locked via API ✓`);
+  }
+  
+  // Retry navigation if the page doesn't fully load (cold-start flakiness)
+  const maxNavigationRetries = 3;
+  for (let attempt = 1; attempt <= maxNavigationRetries; attempt++) {
+    try {
+      await hierarchyPage.goto();
+      await hierarchyPage.page.waitForLoadState('networkidle');
+      await hierarchyPage.waitForPageReady();
+      await hierarchyPage.waitForMakatComboboxReady(30000);
+      break; // success
+    } catch (error) {
+      console.warn(`[beforeEach] Page load attempt ${attempt}/${maxNavigationRetries} failed: ${error}`);
+      if (attempt === maxNavigationRetries) throw error;
+      console.log(`[beforeEach] Reloading page...`);
+      await hierarchyPage.page.reload();
+    }
   }
 });
 

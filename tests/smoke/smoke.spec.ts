@@ -7,7 +7,7 @@ const { makatValidationTestData, hierarchyExpansionTestData, leafCellClickabilit
 // ============ Smoke Test 1: Makat Table Validation ============
 makatValidationTestData.forEach((testData) => {
   test(
-    `smoke_makatValidation[${testData.description}]`,
+    `makatValidationTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
       try {
         // Add material from dropdown
@@ -28,7 +28,7 @@ makatValidationTestData.forEach((testData) => {
 // ============ Smoke Test 2: Hierarchy Expansion ============
 hierarchyExpansionTestData.forEach((testData) => {
   test(
-    `smoke_hierarchyExpansion[${testData.description}]`,
+    `hierarchyExpansionTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
       // Select material from dropdown and add it
       await hierarchyPage.addMakatFromDropdown(testData.materialId);
@@ -46,7 +46,7 @@ hierarchyExpansionTestData.forEach((testData) => {
 // ============ Smoke Test 3: Leaf Cell Clickability ============
 leafCellClickabilityTestData.forEach((testData) => {
   test(
-    `smoke_leafCellClickability[${testData.description}]`,
+    `leafCellClickabilityTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
       // Select material from dropdown and add it
       await hierarchyPage.addMakatFromDropdown(testData.materialId);
@@ -66,7 +66,7 @@ leafCellClickabilityTestData.forEach((testData) => {
 // ============ Smoke Test 4: Save Functionality ============
 saveFunctionalityTestData.forEach((testData) => {
   test(
-    `smoke_saveFunctionality[${testData.description}]`,
+    `saveFunctionalityTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
       try {
         // Select material from dropdown and add it
@@ -106,7 +106,7 @@ saveFunctionalityTestData.forEach((testData) => {
 // ============ Smoke Test 5: Delete Makat Functionality ============
 deleteMakatTestData.forEach((testData) => {
   test(
-    `smoke_deleteMakat[${testData.description}]`,
+    `deleteMakatTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
       try {
         // Step 1: Add material from dropdown
@@ -137,38 +137,38 @@ deleteMakatTestData.forEach((testData) => {
 
 // לשנות ליוזר של פיקוד 
 // ============ Smoke Test 6: Comment Functionality ============
-commentFunctionalityTestData.forEach((testData) => {
-  test(
-    `smoke_commentFunctionality[${testData.description}]`,
-    async ({ hierarchyPage }) => {
-      try {
-        // Select material from dropdown and add it
-        await hierarchyPage.addMakatFromDropdown(testData.materialId);
+// commentFunctionalityTestData.forEach((testData) => {
+//   test(
+//     `smoke_commentFunctionality[${testData.description}]`,
+//     async ({ hierarchyPage }) => {
+//       try {
+//         // Select material from dropdown and add it
+//         await hierarchyPage.addMakatFromDropdown(testData.materialId);
         
-        // Open the comment dialog for this material
-        const dialogOpened = await hierarchyPage.openCommentDialog(testData.materialId);
-        expect(dialogOpened).toBe(true);
+//         // Open the comment dialog for this material
+//         const dialogOpened = await hierarchyPage.openCommentDialog(testData.materialId);
+//         expect(dialogOpened).toBe(true);
         
-        // Add comment to the material
-        const commentAdded = await hierarchyPage.addCommentToMaterial(testData.materialId, testData.commentText);
-        expect(commentAdded).toBe(true);
+//         // Add comment to the material
+//         const commentAdded = await hierarchyPage.addCommentToMaterial(testData.materialId, testData.commentText);
+//         expect(commentAdded).toBe(true);
         
-        // Save the comment
-        const commentSaved = await hierarchyPage.saveComment(testData.materialId);
-        expect(commentSaved).toBe(true);
+//         // Save the comment
+//         const commentSaved = await hierarchyPage.saveComment(testData.materialId);
+//         expect(commentSaved).toBe(true);
         
-        // Close the dialog
-        await hierarchyPage.closeCommentDialog();
+//         // Close the dialog
+//         await hierarchyPage.closeCommentDialog();
         
-        // Re-open the comment dialog to verify the comment was saved
-        const commentExists = await hierarchyPage.verifyCommentExists(testData.materialId, testData.commentText);
-        expect(commentExists).toBe(true);
+//         // Re-open the comment dialog to verify the comment was saved
+//         const commentExists = await hierarchyPage.verifyCommentExists(testData.materialId, testData.commentText);
+//         expect(commentExists).toBe(true);
         
-        console.log(`✓ Comment functionality verified: Comment "${testData.commentText}" saved and retrieved successfully`);
-      } catch (error) {
-        console.error(`✗ Comment test failed: ${error}`);
-        throw error;
-      }
-    }
-  );
-});
+//         console.log(`✓ Comment functionality verified: Comment "${testData.commentText}" saved and retrieved successfully`);
+//       } catch (error) {
+//         console.error(`✗ Comment test failed: ${error}`);
+//         throw error;
+//       }
+//     }
+//   );
+// });

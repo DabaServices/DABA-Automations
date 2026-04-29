@@ -7,7 +7,7 @@ import { APIRequestContext } from '@playwright/test';
  * Takes unit number, parent unit number, lock status (0=unlock, 1=lock), and optional date.
  */
 
-const API_BASE_URL = 'http://162.55.55.124:3000'; //http://localhost:3000
+const API_BASE_URL = 'http://localhost:3000'; //http://localhost:3000    http://dev.162.55.55.124.nip.io/
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -42,7 +42,8 @@ export async function lockUnitStatus(
   unitIds: number[],
   requestingUnitId: number,
   lockStatus: 0 | 1,
-  screenDate?: string
+  screenDate?: string,
+  updateHierarchyOverride?: boolean
 ): Promise<any> {
   const url = `${API_BASE_URL}/statuses`;
   
@@ -52,7 +53,8 @@ export async function lockUnitStatus(
   // CRITICAL: updateHierarchy logic:
   // - lockStatus 0 (UNLOCK): updateHierarchy = false (don't recalculate when unlocking)
   // - lockStatus 1 (LOCK): updateHierarchy = true (recalculate aggregation when locking)
-  const updateHierarchy = lockStatus === 1;
+  // - Can be overridden explicitly via updateHierarchyOverride
+  const updateHierarchy = updateHierarchyOverride ?? (lockStatus === 1);
   
   const payload = {
     unitsIds: unitIds,
