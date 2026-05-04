@@ -1,6 +1,7 @@
 import { APIRequestContext } from '@playwright/test';
 import { unlockHierarchyPath, lockCompleteHierarchy } from './apiHelpers';
 import { updateUnitHierarchy } from './hierarchychange';
+import { BACKEND_URL } from '../../playwright.config';
 
 /**
  * hierarchyCheck.ts
@@ -74,7 +75,7 @@ export interface Transaction {
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const API_BASE_URL = 'http://localhost:3000'; //http://dev.162.55.55.124.nip.io/
+const API_BASE_URL = BACKEND_URL;
 
 // ── Flat hierarchy cache ──────────────────────────────────────────────────────
 // We fetch the full flat unit list once per ensureTestHierarchy call and cache

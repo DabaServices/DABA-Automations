@@ -53,8 +53,8 @@ export class MainPage {
   protected readonly makatCombobox: Locator;
   /** Dropdown options inside the makat combobox */
   protected readonly makatOptions: Locator;
-  /** Button (start adornment) used to add a selected material to the table */
-  protected readonly addButton: Locator;
+  /** "Add Makat" submit button */
+  protected readonly addMakatButton: Locator;
   /** All content rows in the table */
   protected readonly contentRows: Locator;
 
@@ -72,20 +72,20 @@ export class MainPage {
     this.unitHierarchyContent = page.getByTestId('unit-hierarchy-content');
 
     // Header elements group
-    const headerContainer = page.locator('.committees-header');
+    const headerContainer = page.getByTestId('committees-header');
     this.header = {
       container: headerContainer,
-      confirmationPopupTrigger: page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-trigger"]'),
+      confirmationPopupTrigger: page.locator('[data-testid="dialog-trigger-unit-hierarchy-header-confirmation-popup"]'),
       confirmationPopupConfirmBtn: page.locator('[data-testid="unit-hierarchy-header-confirmation-popup-confirm-button"]'),
       saveBtn: page.getByTestId('save-button-icon'),
-      menuBtn: page.getByTestId('unit-hierarchy-drawer-trigger'),
+      menuBtn: page.getByTestId('drawer-trigger-unit-hierarchy-drawer'),
     };
 
     // Material search combobox chips
-    this.materialSearchChips = page.getByTestId('material-search-combobox-chips');
+    this.materialSearchChips = page.getByTestId('combobox-chips-material-search-combobox');
 
     // Makat search field container
-    this.makatSearchField = page.locator('.material-search-combobox-container');
+    this.makatSearchField = page.getByTestId('material-search');
 
     // Comment trigger icon (dynamic data-testid: row-comment-trigger-icon-<makatId>)
     this.commentTriggerIcon = page.locator('[data-testid*="row-comment-trigger-icon"]');
@@ -94,8 +94,8 @@ export class MainPage {
     this.makatCombobox = page.getByRole('combobox', { name: /בחירת מק״ט/ });
     this.makatOptions = page.locator('[role="option"]');
 
-    // Add button
-    this.addButton = page.getByTestId('start-adornment');
+    // Add Makat button – the "+" button scoped by its StartAdornment class
+    this.addMakatButton = page.locator('button[data-testid="button"][class*="StartAdornment"]');
 
     // Table rows
     this.contentRows = page.locator('[data-testid*="content-row"]');
@@ -279,16 +279,18 @@ export class MainPage {
     console.info(`[waitForMakatComboboxReady] Waiting for makat combobox to be ready (${timeout}ms)...`);
     try {
       // The combobox can briefly disappear/remount while React rehydrates
-      // after the lock & hierarchy fetches finish. We therefore:
-      //   1. Wait for it to be visible.
-      //   2. Wait for it to be enabled.
-      //   3. Re-check visibility after a short settle to make sure it didn't
-      //      get unmounted again while we were transitioning.
-      await expect(this.makatCombobox).toBeVisible({ timeout });
+      // after the lock & hierarchy fetches finish. Use waitForSelector to
+      // poll the DOM until the element exists, then assert visibility.
+      await this.page.waitForSelector('[role="combobox"]', {
+        state: 'visible',
+        timeout,
+      });
+
+      await expect(this.makatCombobox).toBeVisible({ timeout: 10_000 });
       await expect(this.makatCombobox).toBeEnabled({ timeout: Math.min(10_000, timeout) });
 
       // Let React finish any in-flight remount before consumers click.
-      await this.page.waitForTimeout(200);
+      await this.page.waitForTimeout(500);
       await expect(this.makatCombobox).toBeVisible({ timeout: 5_000 });
 
       await this.makatCombobox.scrollIntoViewIfNeeded();
@@ -342,9 +344,9 @@ export class MainPage {
     }
   }
 
-  /** Click the "+" start-adornment that adds the currently selected material. */
+  /** Click the "+" button that adds the currently selected material. */
   async clickAddMakatAdornment(): Promise<void> {
-    await this.addButton.click();
+    await this.addMakatButton.click();
   }
 
   /**
@@ -370,13 +372,13 @@ export class MainPage {
         } catch (error) {
           if (attempt === maxRetries) throw error;
           console.warn(`[addMakatFromDropdown] Selection attempt ${attempt} failed, retrying...`);
-          await this.page.reload();
-          await this.waitForPageReady();
-          await this.waitForNetworkIdle();
+          await this.goto();
+          await this.page.waitForLoadState('networkidle');
+          await this.waitForMakatComboboxReady(30000);
         }
       }
 
-      await this.clickAddMakatAdornment();
+      await this.addMakatButton.click();
       await this.waitForMaterialRow(materialIdOrText);
 
       console.info(`[addMakatFromDropdown] Successfully added material: ${materialIdOrText}`);

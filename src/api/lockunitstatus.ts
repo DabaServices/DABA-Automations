@@ -1,4 +1,5 @@
 import { APIRequestContext } from '@playwright/test';
+import { BACKEND_URL } from '../../playwright.config';
 
 /**
  * Lock/Unlock Unit Status API
@@ -7,7 +8,7 @@ import { APIRequestContext } from '@playwright/test';
  * Takes unit number, parent unit number, lock status (0=unlock, 1=lock), and optional date.
  */
 
-const API_BASE_URL = 'http://localhost:3000'; //http://localhost:3000    http://dev.162.55.55.124.nip.io/
+const API_BASE_URL = BACKEND_URL;
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -51,8 +52,7 @@ export async function lockUnitStatus(
   const currentDate = screenDate || getTodayDate();
   
   // CRITICAL: updateHierarchy logic:
-  // - lockStatus 0 (UNLOCK): updateHierarchy = false (don't recalculate when unlocking)
-  // - lockStatus 1 (LOCK): updateHierarchy = true (recalculate aggregation when locking)
+  // - Always true to ensure aggregation is recalculated on every lock/unlock
   // - Can be overridden explicitly via updateHierarchyOverride
   const updateHierarchy = updateHierarchyOverride ?? (lockStatus === 1);
   

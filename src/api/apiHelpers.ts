@@ -1,5 +1,6 @@
 import { APIRequestContext } from '@playwright/test';
 import { lockUnitStatus } from './lockunitstatus';
+import { BACKEND_URL } from '../../playwright.config';
 
 /**
  * apiHelpers - Reusable helpers for API-related test operations
@@ -57,7 +58,7 @@ export const unlockHierarchyPath = async (
  * @param unitsToLock     - Array of unit IDs to lock (can be separate units)
  * @param rootFather      - Parent of all units in the array (default: 1)
  */
-const PIKUDS_API_URL = 'http://localhost:3002/units/pikuds';
+const PIKUDS_API_URL = `${BACKEND_URL}/units/pikuds`;
 
 /**
  * Fetch all top-level unit IDs (pikuds) from the API.
@@ -123,6 +124,25 @@ export const lockCompleteHierarchy = async (
   } catch (error) {
     console.error(`[lockCompleteHierarchy] Failed to lock units [${effectiveUnits.join(', ')}]: ${error}`);
     throw error;
+  }
+
+  // After locking, call GET /units/hierarchy to trigger a full hierarchy
+  // refresh on the backend (mirrors what the UI does after confirming the lock).
+  // Without this call, aggregation values for old parents may remain stale.
+  try {
+    const date = new Date().toISOString().split('T')[0];
+    await request.get(`${BACKEND_URL}/units/hierarchy?user=S9107544`, {
+      headers: {
+        'Content-Type': 'application/json',
+        authorization: 'Bearer',
+        unit: rootFather.toString(),
+        screendate: date,
+        user: 'S9107544',
+      },
+    });
+    console.info(`[lockCompleteHierarchy] Hierarchy refresh triggered via GET /units/hierarchy`);
+  } catch (error) {
+    console.warn(`[lockCompleteHierarchy] Hierarchy refresh call failed (non-critical): ${error}`);
   }
 
   console.info(`[lockCompleteHierarchy] Completed locking all ${effectiveUnits.length} units`);

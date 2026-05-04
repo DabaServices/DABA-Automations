@@ -17,7 +17,7 @@
     {
       "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level",
-      "unitsToExpand": [2, 11, 101]
+      "unitsToExpand": [2, 11, 101, 401]
     }
   ],
   "saveFunctionalityTestData": [

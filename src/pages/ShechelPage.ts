@@ -64,7 +64,7 @@ export class ShechelPage extends MainPage {
   }
 
   private hierarchyExpandTooltip(unitId: number): Locator {
-    return this.page.locator(`[data-testid="unit-hierarchy-row-expand-tooltip-${unitId}-wrapper"]`);
+    return this.page.locator(`[data-testid="tooltip-trigger-unit-hierarchy-row-expand-tooltip-${unitId}"]`);
   }
 
   private hierarchyComboboxInput(parentId: number): Locator {
@@ -76,11 +76,11 @@ export class ShechelPage extends MainPage {
   }
 
   private hierarchyComboboxActionBtn(parentId: number): Locator {
-    return this.page.locator(`[data-testid="unit-hierarchy-node-combobox-${parentId}-action-button"]`);
+    return this.page.locator(`[data-testid="button-unit-hierarchy-node-combobox-${parentId}-action-button"]`);
   }
 
   private commentTrigger(materialId: string): Locator {
-    return this.page.getByTestId(`row-comment-dialog-${materialId}-trigger`);
+    return this.page.getByTestId(`dialog-trigger-row-comment-dialog-${materialId}`);
   }
 
   private commentContent(materialId: string): Locator {
@@ -208,6 +208,21 @@ export class ShechelPage extends MainPage {
         // If this is the leaf in the requested path, that's expected.
         if (i === unitsToExpand.length - 1) {
           console.info(`[expandHierarchyToLeaf] No network button on leaf unit ${unitId} — leaf reached.`);
+          // Wait for the parent's sub-row-cells-wrapper to fully render so
+          // setLeafCellValues can find the leaf cells immediately after.
+          if (i > 0) {
+            const parentUnitId = unitsToExpand[i - 1];
+            await this.page
+              .waitForSelector(
+                `[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`,
+                { state: 'visible', timeout: 10_000 }
+              )
+              .catch(() => {
+                console.warn(
+                  `[expandHierarchyToLeaf] sub-row-cells-wrapper for parent ${parentUnitId} did not appear in time.`
+                );
+              });
+          }
           break;
         }
         console.warn(`[expandHierarchyToLeaf] Network button not visible for unit ${unitId} — cannot continue.`);
@@ -272,7 +287,9 @@ export class ShechelPage extends MainPage {
     incrementValue: number = 4
   ): Promise<Map<string, number>> {
     const setLeafValues = new Map<string, number>();
-    const parentUnits = new Set(unitsToExpand.map(String));
+    // Only exclude units that are actual ancestors (i.e. appear *before* the
+    // deepest wrapper parent in the path).  Siblings of the last unit in the
+    // path (like 401 and 701 under 101) should NOT be excluded.
     const clicks = Math.max(0, incrementValue);
 
     try {
@@ -281,6 +298,7 @@ export class ShechelPage extends MainPage {
       );
 
       // 1. Locate the deepest sub-row-cells-wrapper that actually rendered.
+      //    Use a longer timeout on the first pass to handle slow renders after expansion.
       let parentUnitId: number | null = null;
       let wrapper: Locator | null = null;
       for (let i = unitsToExpand.length - 1; i >= 0; i--) {
@@ -288,7 +306,7 @@ export class ShechelPage extends MainPage {
           .locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${unitsToExpand[i]}"]`)
           .first();
         if (await candidate.count()) {
-          if (await candidate.isVisible({ timeout: 1500 }).catch(() => false)) {
+          if (await candidate.isVisible({ timeout: 5000 }).catch(() => false)) {
             parentUnitId = unitsToExpand[i];
             wrapper = candidate;
             break;
@@ -305,56 +323,135 @@ export class ShechelPage extends MainPage {
 
       console.log(`[setLeafCellValues] Using parent unit ${parentUnitId} as leaf-children container`);
 
-      // 2. Enumerate child unit IDs from the sub-row-cell testids inside the wrapper.
+      // 2. Enumerate child unit IDs from leaf cells inside the wrapper.
+      //    Two types of leaf cells exist:
+      //      - chip-zero-cell-${mat}-${unitId}            : never clicked (zero state)
+      //      - numberfield-group-numbered-cell-${mat}-${unitId} : already has a value;
+      //        exposes numberfield-increment-... / numberfield-decrement-... buttons.
+      //    Fall back to the legacy `sub-row-cell-${mat}-${unitId}` wrapper test-id
+      //    so older UI builds keep working.
       const childUnitIds: string[] = await wrapper.evaluate(
         (root: Element, mat: string) => {
-          const ids: string[] = [];
-          root
-            .querySelectorAll(`[data-testid^="sub-row-cell-${mat}-"]`)
-            .forEach((el) => {
-              const tid = el.getAttribute('data-testid') || '';
-              const m = tid.match(/^sub-row-cell-[^-]+-(\d+)$/);
-              if (m) ids.push(m[1]);
-            });
-          return Array.from(new Set(ids));
+          const ids = new Set<string>();
+          const patterns = [
+            new RegExp(`^chip-zero-cell-${mat}-(\\d+)$`),
+            new RegExp(`^numberfield-group-numbered-cell-${mat}-(\\d+)$`),
+            new RegExp(`^sub-row-cell-${mat}-(\\d+)$`),
+          ];
+          const selector = [
+            `[data-testid^="chip-zero-cell-${mat}-"]`,
+            `[data-testid^="numberfield-group-numbered-cell-${mat}-"]`,
+            `[data-testid^="sub-row-cell-${mat}-"]`,
+          ].join(', ');
+          root.querySelectorAll(selector).forEach((el) => {
+            const tid = el.getAttribute('data-testid') || '';
+            for (const re of patterns) {
+              const m = tid.match(re);
+              if (m) {
+                ids.add(m[1]);
+                break;
+              }
+            }
+          });
+          return Array.from(ids);
         },
         materialId
       );
 
-      const leafChildren = childUnitIds.filter((u) => !parentUnits.has(u));
+      // Only exclude units that have their own visible sub-row-cells-wrapper
+      // (i.e. they are actual parent nodes, not leaf siblings).
+      const actualParents = new Set<string>();
+      for (const uid of childUnitIds) {
+        const childWrapper = wrapper!.locator(
+          `[data-testid="sub-row-cells-wrapper-${materialId}-${uid}"]`
+        ).first();
+        if (await childWrapper.count() && await childWrapper.isVisible({ timeout: 500 }).catch(() => false)) {
+          actualParents.add(uid);
+        }
+      }
+      const leafChildren = childUnitIds.filter((u) => !actualParents.has(u));
       console.log(
         `[setLeafCellValues] Discovered ${leafChildren.length} leaf cell(s) under ${parentUnitId}: [${leafChildren.join(', ')}]`
       );
 
-      // 3. For each leaf cell, click the increment button `clicks` times.
+      // 3. For each leaf cell, perform `clicks` increments, handling cell types.
+      //    Two types exist:
+      //      - chip-zero-cell: zero state, clickable to activate
+      //      - numberfield-group-numbered-cell: numbered cell. If it has an increment
+      //        button we can change its value; if not, it's a fixed-value cell — skip it.
       for (const unitId of leafChildren) {
         try {
-          const cell = wrapper.locator(`[data-testid="sub-row-cell-${materialId}-${unitId}"]`).first();
-          const incrementBtn = cell.locator('[data-testid="increment"]').first();
-          const inputField = cell.locator('[data-testid="input"]').first();
+          const chipZero = wrapper
+            .locator(`[data-testid="chip-zero-cell-${materialId}-${unitId}"]`)
+            .first();
+          const numberedGroup = wrapper
+            .locator(`[data-testid="numberfield-group-numbered-cell-${materialId}-${unitId}"]`)
+            .first();
 
-          await cell.scrollIntoViewIfNeeded().catch(() => undefined);
+          // Determine which variant is currently rendered.
+          const isChipZero = await chipZero.isVisible({ timeout: 500 }).catch(() => false);
+          const isNumbered = !isChipZero && await numberedGroup.isVisible({ timeout: 500 }).catch(() => false);
 
+          let remainingClicks = clicks;
           let currentValue = 0;
-          try {
-            currentValue = parseInt(
-              (await inputField.inputValue().catch(() => '0')) || '0',
-              10
+
+          if (isChipZero) {
+            // Chip-zero cell: a single click converts it into a numbered cell (value becomes 1).
+            await chipZero.scrollIntoViewIfNeeded().catch(() => undefined);
+            console.log(
+              `[setLeafCellValues] Unit ${unitId}: chip-zero-cell -> click 1/${clicks} to activate`
             );
-          } catch {
-            currentValue = 0;
+            if (remainingClicks > 0) {
+              await chipZero.click();
+              remainingClicks -= 1;
+              currentValue = 1;
+              // Allow the chip to rerender as a numberfield-group before continuing.
+              await this.page.waitForTimeout(150);
+            }
+          } else if (isNumbered) {
+            // Already a numbered cell – read current value.
+            const inputField = numberedGroup
+              .locator('[data-testid*="input"]')
+              .first();
+            try {
+              currentValue = parseInt(
+                (await inputField.inputValue().catch(() => '0')) || '0',
+                10
+              );
+            } catch {
+              currentValue = 0;
+            }
+          } else {
+            console.log(`[setLeafCellValues] Unit ${unitId}: no chip-zero or numbered cell found, skipping`);
+            continue;
+          }
+
+          // After (optional) activation, the cell should be a numberfield-group.
+          const incrementBtn = wrapper
+            .locator(`[data-testid="numberfield-increment-numbered-cell-${materialId}-${unitId}"]`)
+            .first();
+          const inputField = numberedGroup
+            .locator('[data-testid*="input"]')
+            .first();
+
+          // If the increment button isn't actually visible, skip this cell.
+          const incrementVisible = await incrementBtn.isVisible({ timeout: 500 }).catch(() => false);
+          if (!incrementVisible) {
+            console.log(`[setLeafCellValues] Unit ${unitId}: increment button not visible, skipping`);
+            setLeafValues.set(unitId, currentValue);
+            continue;
           }
 
           console.log(
-            `[setLeafCellValues] Unit ${unitId}: current=${currentValue}, +${clicks} click(s)`
+            `[setLeafCellValues] Unit ${unitId}: current=${currentValue}, +${remainingClicks} increment click(s)`
           );
-          for (let i = 0; i < clicks; i++) {
+          for (let i = 0; i < remainingClicks; i++) {
             await incrementBtn.click();
           }
 
           // Small settle so the input reflects the final state.
           await this.page.waitForTimeout(150);
-          let finalValue = currentValue + clicks;
+          let finalValue = currentValue + remainingClicks;
           try {
             finalValue = parseInt(
               (await inputField.inputValue().catch(() => `${finalValue}`)) || `${finalValue}`,
@@ -385,71 +482,19 @@ export class ShechelPage extends MainPage {
     }
   }
 
-  // ──────────────── Hierarchy Management ────────────────
-
-  async unitMoveUI(
-    unitId: number,
-    newParentId: number,
-    newHierarchy: number[]
-  ): Promise<void> {
-    console.info(`[unitMoveUI] Moving unit ${unitId} to parent ${newParentId}`);
-
-    await this.header.menuBtn.click();
-    await this.unitHierarchyDrawerContent.waitFor({ state: 'visible', timeout: 3000 });
-
-    const drawerVisible = await this.unitHierarchyDrawerContent.isVisible({ timeout: 3000 }).catch(() => false);
-    if (!drawerVisible) {
-      throw new Error('Unit Hierarchy Drawer failed to open');
-    }
-
-    const parentIndex = newHierarchy.indexOf(newParentId);
-    if (parentIndex !== -1) {
-      for (let i = 0; i <= parentIndex; i++) {
-        const expandTooltip = this.hierarchyExpandTooltip(newHierarchy[i]);
-        const isVisible = await expandTooltip.isVisible({ timeout: 2000 }).catch(() => false);
-
-        if (isVisible) {
-          await expandTooltip.click();
-          await this.page.waitForLoadState('domcontentloaded').catch(() => {});
-        }
-      }
-    }
-
-    const comboboxInput = this.hierarchyComboboxInput(newParentId);
-    await comboboxInput.click();
-    await this.waitForNetworkIdle();
-
-    await comboboxInput.fill(unitId.toString());
-
-    const unitOption = this.hierarchyComboboxItem(newParentId, unitId);
-    await unitOption.waitFor({ state: 'visible', timeout: 3000 });
-    await unitOption.click();
-
-    const transferBtn = this.page.getByRole('button', { name: 'העבר' });
-    await transferBtn.waitFor({ state: 'visible', timeout: 3000 });
-    await transferBtn.click();
-    await this.waitForNetworkIdle();
-
-    await this.waitForNetworkIdle();
-
-    const closeTrigger = this.page.getByTestId('unit-hierarchy-header-confirmation-popup-trigger');
-    await closeTrigger.waitFor({ state: 'visible', timeout: 3000 });
-    await closeTrigger.click();
-
-    const confirmBtn = this.page.getByTestId('unit-hierarchy-header-confirmation-popup-confirm-button');
-    await confirmBtn.waitFor({ state: 'visible', timeout: 3000 });
-    await confirmBtn.click();
-
-    await this.waitForNetworkIdle();
-    console.log(`  ✓ unitMoveUI: unit ${unitId} moved to parent ${newParentId}`);
-  }
-
-  async confirmAndLockHierarchyViaDrawer(): Promise<void> {
+    async confirmAndLockHierarchyViaDrawer(): Promise<void> {
     console.log(`\n[Confirming and locking hierarchy via drawer]`);
 
-    console.log(`  Opening drawer...`);
-    await this.header.menuBtn.click();
-    await this.page.waitForLoadState('domcontentloaded');
+    // Only open the drawer if it's not already visible
+    const drawerAlreadyOpen = await this.unitHierarchyDrawerContent.isVisible({ timeout: 1000 }).catch(() => false);
+    if (!drawerAlreadyOpen) {
+      console.log(`  Opening drawer...`);
+      await this.header.menuBtn.click();
+      await this.unitHierarchyDrawerContent.waitFor({ state: 'visible', timeout: 5000 });
+      await this.page.waitForLoadState('domcontentloaded');
+    } else {
+      console.log(`  Drawer already open, skipping open step`);
+    }
 
     console.log(`  Clicking confirmation trigger...`);
     await this.header.confirmationPopupTrigger.waitFor({ state: 'visible', timeout: 3000 });
@@ -470,6 +515,88 @@ export class ShechelPage extends MainPage {
 
     console.log(`  ✓ Hierarchy confirmed and locked\n`);
   }
+  // ──────────────── Hierarchy Management ────────────────
+
+  async unitMoveUI(
+    unitId: number,
+    newParentId: number,
+    newHierarchy: number[]
+  ): Promise<void> {
+    console.info(`[unitMoveUI] Moving unit ${unitId} to parent ${newParentId}`);
+
+    // Ensure the drawer is open, handling cases where it may already be visible
+    // or the trigger needs a moment to become interactive.
+    await this.ensureDrawerOpen();
+    await this.unitHierarchyDrawerContent.waitFor({ state: 'visible', timeout: 10000 });
+
+    const drawerVisible = await this.unitHierarchyDrawerContent.isVisible({ timeout: 3000 }).catch(() => false);
+    if (!drawerVisible) {
+      // Retry: sometimes the first click doesn't register
+      console.warn(`[unitMoveUI] Drawer not visible after first attempt, retrying...`);
+      await this.page.waitForTimeout(500);
+      await this.header.menuBtn.click();
+      await this.unitHierarchyDrawerContent.waitFor({ state: 'visible', timeout: 10000 });
+    }
+
+    console.info(`[unitMoveUI] Drawer is open`);
+
+    const parentIndex = newHierarchy.indexOf(newParentId);
+    if (parentIndex !== -1) {
+      for (let i = 0; i <= parentIndex; i++) {
+        // Try the expand tooltip first, then fall back to the accordion trigger
+        const expandTooltip = this.hierarchyExpandTooltip(newHierarchy[i]);
+        const accordionTrigger = this.page.locator(
+          `[data-testid="accordion-trigger-unit-hierarchy-node-accordion-${newHierarchy[i]}"]`
+        );
+
+        const tooltipVisible = await expandTooltip.isVisible({ timeout: 2000 }).catch(() => false);
+        if (tooltipVisible) {
+          await expandTooltip.click();
+          await this.page.waitForTimeout(500);
+        } else {
+          const accordionVisible = await accordionTrigger.isVisible({ timeout: 2000 }).catch(() => false);
+          if (accordionVisible) {
+            await accordionTrigger.click();
+            await this.page.waitForTimeout(500);
+          }
+        }
+      }
+    }
+
+    const comboboxInput = this.hierarchyComboboxInput(newParentId);
+    await comboboxInput.click();
+    await this.waitForNetworkIdle();
+
+    await comboboxInput.fill(unitId.toString());
+
+    const unitOption = this.hierarchyComboboxItem(newParentId, unitId);
+    await unitOption.waitFor({ state: 'visible', timeout: 3000 });
+    await unitOption.click();
+
+    // Click the action button (labeled "הוספה") to execute the move
+    const actionBtn = this.hierarchyComboboxActionBtn(newParentId);
+    await actionBtn.waitFor({ state: 'visible', timeout: 3000 });
+    await actionBtn.click();
+    await this.waitForNetworkIdle();
+
+    // Confirm and lock directly (drawer is already open from ensureDrawerOpen above)
+    const closeTrigger = this.page.getByTestId('dialog-trigger-unit-hierarchy-header-confirmation-popup');
+    await closeTrigger.waitFor({ state: 'visible', timeout: 3000 });
+    await closeTrigger.click();
+
+    const confirmBtn = this.page.getByTestId('unit-hierarchy-header-confirmation-popup-confirm-button');
+    await confirmBtn.waitFor({ state: 'visible', timeout: 3000 });
+    await confirmBtn.click();
+    await this.waitForNetworkIdle();
+
+    // Close the drawer
+    await this.page.keyboard.press('Escape');
+    await this.unitHierarchyDrawerContent.waitFor({ state: 'hidden', timeout: 3000 }).catch(() => {});
+
+    console.log(`  ✓ unitMoveUI: unit ${unitId} moved to parent ${newParentId}`);
+  }
+
+
 
   // ──────────────── Aggregation Verification (Shechel / Mlai) ────────────────
 

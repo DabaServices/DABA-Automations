@@ -1,5 +1,17 @@
 import { defineConfig, devices } from '@playwright/test';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Centralized URLs for the application under test.
+// Override at runtime via environment variables, e.g.:
+//   FRONTEND_URL=http://dev.162.55.55.124.nip.io/ npx playwright test
+//   BACKEND_URL=http://localhost:3000 npx playwright test
+// ─────────────────────────────────────────────────────────────────────────────
+export const FRONTEND_URL =
+  process.env.FRONTEND_URL || 'http://auto.162.55.55.124.nip.io/';
+// Backend API
+export const BACKEND_URL =
+  process.env.BACKEND_URL || 'http://auto-api.162.55.55.124.nip.io';
+
 export default defineConfig({
   // Include all test files in tests folder (e2e, smoke, etc)
   testDir: './tests',
@@ -24,7 +36,7 @@ export default defineConfig({
   // 3. הגדרות בסיסיות לכל בדיקה
   use: {
     // הכתובת של האתר שלך 
-    baseURL: 'http://localhost:5173/', // http://localhost:5173/  http://dev.162.55.55.124.nip.io/
+    baseURL: FRONTEND_URL,
 
     // צילום מסך רק כשניסוי נכשל - חוסך מקום ומסדר את הדו"ח
     screenshot: 'only-on-failure',

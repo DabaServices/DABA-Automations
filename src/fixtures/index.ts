@@ -105,27 +105,44 @@ test.beforeEach(async ({ hierarchyPage, request }) => {
   if (setup) {
     const { requiredHierarchy, newHierarchyPrefix } = setup;
 
+    const maxSetupRetries = 3;
+    const retryDelayMs = 3000;
+
     // Step 1: ensure the starting path (unitsToExpand / old hierarchy)
     if (requiredHierarchy.length > 0) {
       console.log(`\n[beforeEach] Ensuring old hierarchy [${requiredHierarchy.join(' → ')}] for: ${title}`);
-      try {
-        await ensureTestHierarchy(request, buildHierarchyFromPath(requiredHierarchy));
-        console.log(`[beforeEach] Old hierarchy verified ✓`);
-      } catch (error) {
-        console.error(`[beforeEach] Failed to ensure old hierarchy: ${error}`);
-        throw new Error(`[beforeEach] Hierarchy setup failed for "${title}". The required hierarchy [${requiredHierarchy.join(' → ')}] could not be established. This may be caused by a previous test leaving the system in an unexpected state.`);
+      for (let attempt = 1; attempt <= maxSetupRetries; attempt++) {
+        try {
+          await ensureTestHierarchy(request, buildHierarchyFromPath(requiredHierarchy));
+          console.log(`[beforeEach] Old hierarchy verified ✓`);
+          break;
+        } catch (error) {
+          if (attempt === maxSetupRetries) {
+            console.error(`[beforeEach] Failed to ensure old hierarchy after ${maxSetupRetries} attempts: ${error}`);
+            throw new Error(`[beforeEach] Hierarchy setup failed for "${title}". The required hierarchy [${requiredHierarchy.join(' → ')}] could not be established after ${maxSetupRetries} attempts. This may be caused by a previous test leaving the system in an unexpected state.`);
+          }
+          console.warn(`[beforeEach] Hierarchy setup attempt ${attempt}/${maxSetupRetries} failed, retrying in ${retryDelayMs}ms...`);
+          await new Promise(r => setTimeout(r, retryDelayMs));
+        }
       }
     }
 
     // Step 2: if a newHierarchy exists, also ensure the destination parent chain
     if (newHierarchyPrefix && newHierarchyPrefix.length > 0) {
       console.log(`[beforeEach] Ensuring destination parent chain [${newHierarchyPrefix.join(' → ')}]`);
-      try {
-        await ensureTestHierarchy(request, buildHierarchyFromPath(newHierarchyPrefix));
-        console.log(`[beforeEach] Destination parent chain verified ✓`);
-      } catch (error) {
-        console.error(`[beforeEach] Failed to ensure destination parent chain: ${error}`);
-        throw new Error(`[beforeEach] Destination hierarchy setup failed for "${title}". Chain [${newHierarchyPrefix.join(' → ')}] could not be established.`);
+      for (let attempt = 1; attempt <= maxSetupRetries; attempt++) {
+        try {
+          await ensureTestHierarchy(request, buildHierarchyFromPath(newHierarchyPrefix));
+          console.log(`[beforeEach] Destination parent chain verified ✓`);
+          break;
+        } catch (error) {
+          if (attempt === maxSetupRetries) {
+            console.error(`[beforeEach] Failed to ensure destination parent chain after ${maxSetupRetries} attempts: ${error}`);
+            throw new Error(`[beforeEach] Destination hierarchy setup failed for "${title}". Chain [${newHierarchyPrefix.join(' → ')}] could not be established after ${maxSetupRetries} attempts.`);
+          }
+          console.warn(`[beforeEach] Destination chain setup attempt ${attempt}/${maxSetupRetries} failed, retrying in ${retryDelayMs}ms...`);
+          await new Promise(r => setTimeout(r, retryDelayMs));
+        }
       }
     }
 
@@ -161,12 +178,18 @@ test.beforeEach(async ({ hierarchyPage, request }) => {
       await hierarchyPage.page.waitForLoadState('networkidle');
       await hierarchyPage.waitForPageReady();
       await hierarchyPage.waitForMakatComboboxReady(30000);
+
+      // Wait for the page to stabilize — the combobox can briefly appear
+      // then disappear during a late React re-render triggered by lock/data fetch.
+      await hierarchyPage.page.waitForTimeout(2000);
+      await hierarchyPage.page.waitForLoadState('networkidle');
+      await hierarchyPage.waitForMakatComboboxReady(30000);
       break; // success
     } catch (error) {
       console.warn(`[beforeEach] Page load attempt ${attempt}/${maxNavigationRetries} failed: ${error}`);
       if (attempt === maxNavigationRetries) throw error;
-      console.log(`[beforeEach] Reloading page...`);
-      await hierarchyPage.page.reload();
+      console.log(`[beforeEach] Retrying with fresh navigation...`);
+      await hierarchyPage.page.waitForTimeout(2000); // let the server settle
     }
   }
 });
