@@ -57,6 +57,12 @@ export class MainPage {
   protected readonly addMakatButton: Locator;
   /** All content rows in the table */
   protected readonly contentRows: Locator;
+  /** Input inside the makat search field */
+  protected readonly makatSearchInput: Locator;
+  /** Comment input/textarea field */
+  protected readonly commentField: Locator;
+  /** Collapsed/expandable tree nodes */
+  protected readonly collapsedNodes: Locator;
 
   /**
    * Internal hierarchy map populated by {@link captureAllVisibleCellValuesAtEachLevel}
@@ -99,6 +105,19 @@ export class MainPage {
 
     // Table rows
     this.contentRows = page.locator('[data-testid*="content-row"]');
+
+    // Makat search input (inside the search field container)
+    this.makatSearchInput = this.makatSearchField.locator('input').first();
+
+    // Comment input/textarea that appears after clicking comment icon
+    this.commentField = page.locator(
+      '[data-testid*="comment-input"], [data-testid*="comment-textarea"], textarea[placeholder*="comment" i], input[placeholder*="comment" i]'
+    ).first();
+
+    // Collapsed/expandable tree nodes for hierarchy expansion
+    this.collapsedNodes = page.locator(
+      '[aria-expanded="false"], [data-testid*="expand-trigger"], [data-testid*="toggle-expand"]'
+    );
   }
 
   // ──────────────── Locator Helpers ────────────────
@@ -109,6 +128,14 @@ export class MainPage {
    */
   commentTriggerIconFor(makatId: string): Locator {
     return this.page.locator(`[data-testid="row-comment-trigger-icon-${makatId}"]`);
+  }
+
+  /** Returns a dropdown option locator filtered by the given Makat ID text. */
+  protected makatSearchOption(makatId: string): Locator {
+    return this.page
+      .locator('[role="option"], [data-testid*="material-search-option"]')
+      .filter({ hasText: makatId })
+      .first();
   }
 
   /** Numbered cell locator for a (materialId, unitId) pair. */
@@ -215,16 +242,11 @@ export class MainPage {
     try {
       await this.makatSearchField.waitFor({ state: 'visible', timeout: 10_000 });
 
-      const input = this.makatSearchField.locator('input').first();
-      await input.click();
-      await input.fill(makatId);
+      await this.makatSearchInput.click();
+      await this.makatSearchInput.fill(makatId);
 
       // Wait for the dropdown option matching the makat ID and click it.
-      const option = this.page
-        .locator('[role="option"], [data-testid*="material-search-option"]')
-        .filter({ hasText: makatId })
-        .first();
-
+      const option = this.makatSearchOption(makatId);
       await option.waitFor({ state: 'visible', timeout: 10_000 });
       await option.click();
 
@@ -254,14 +276,8 @@ export class MainPage {
       await icon.click();
 
       // Locate the comment editor that appears after clicking the icon.
-      const commentField = this.page
-        .locator(
-          '[data-testid*="comment-input"], [data-testid*="comment-textarea"], textarea[placeholder*="comment" i], input[placeholder*="comment" i]'
-        )
-        .first();
-
-      await commentField.waitFor({ state: 'visible', timeout: 5_000 });
-      await commentField.fill(text);
+      await this.commentField.waitFor({ state: 'visible', timeout: 5_000 });
+      await this.commentField.fill(text);
 
       console.info(`[addComment] Comment added to Makat ${makatId}`);
     } catch (error) {
@@ -601,11 +617,7 @@ export class MainPage {
       return;
     }
 
-    const collapsedNodes = this.page.locator(
-      '[aria-expanded="false"], [data-testid*="expand-trigger"], [data-testid*="toggle-expand"]'
-    );
-
-    const count = await collapsedNodes.count().catch(() => 0);
+    const count = await this.collapsedNodes.count().catch(() => 0);
     if (count === 0) {
       console.info(`[expandToLeaf] No more collapsed nodes – fully expanded.`);
       return;
@@ -614,7 +626,7 @@ export class MainPage {
     console.info(`[expandToLeaf] Expanding ${count} node(s) at depth ${21 - maxDepth}`);
 
     for (let i = 0; i < count; i++) {
-      const node = collapsedNodes.nth(i);
+      const node = this.collapsedNodes.nth(i);
       try {
         if (await node.isVisible({ timeout: 500 }).catch(() => false)) {
           await node.click({ timeout: 2_000 }).catch(() => {});

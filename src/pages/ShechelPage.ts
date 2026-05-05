@@ -1,4 +1,4 @@
-import { Page, Locator } from '@playwright/test';
+import { Page, Locator, expect } from '@playwright/test';
 import { MainPage } from './MainPage';
 
 /**
@@ -79,6 +79,40 @@ export class ShechelPage extends MainPage {
     return this.page.locator(`[data-testid="button-unit-hierarchy-node-combobox-${parentId}-action-button"]`);
   }
 
+  private accordionTrigger(unitId: number): Locator {
+    return this.page.locator(`[data-testid="accordion-trigger-unit-hierarchy-node-accordion-${unitId}"]`);
+  }
+
+  private chipZeroCell(wrapper: Locator, materialId: string, unitId: string): Locator {
+    return wrapper.locator(`[data-testid="chip-zero-cell-${materialId}-${unitId}"]`).first();
+  }
+
+  private numberedGroupCell(wrapper: Locator, materialId: string, unitId: string): Locator {
+    return wrapper.locator(`[data-testid="numberfield-group-numbered-cell-${materialId}-${unitId}"]`).first();
+  }
+
+  private incrementButton(wrapper: Locator, materialId: string, unitId: string): Locator {
+    return wrapper.locator(`[data-testid="numberfield-increment-numbered-cell-${materialId}-${unitId}"]`).first();
+  }
+
+  private cellInputField(cell: Locator): Locator {
+    return cell.locator('[data-testid*="input"]').first();
+  }
+
+  private subRowCellsWrapperFor(materialId: string, unitId: number): Locator {
+    return this.page.locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${unitId}"]`).first();
+  }
+
+  private subRowCell(materialId: string, unitId: number): Locator {
+    return this.page.locator(`[data-testid="sub-row-cell-${materialId}-${unitId}"]`).first();
+  }
+
+  private cellForUnit(materialId: string, unitId: number): Locator {
+    return this.page.locator(
+      `[data-testid="row-cell-${materialId}-${unitId}"], [data-testid="sub-row-cell-${materialId}-${unitId}"], [data-testid*="numbered-cell-${materialId}-${unitId}"]`
+    ).first();
+  }
+
   private commentTrigger(materialId: string): Locator {
     return this.page.getByTestId(`dialog-trigger-row-comment-dialog-${materialId}`);
   }
@@ -98,16 +132,7 @@ export class ShechelPage extends MainPage {
     try {
       await this.header.saveBtn.waitFor({ state: 'visible', timeout: 10000 });
       await this.header.saveBtn.waitFor({ state: 'attached', timeout: 5000 });
-      await this.page.waitForFunction(
-        (selector) => {
-          const el = document.querySelector(selector);
-          if (!el) return false;
-          const btn = el.closest('button') || el;
-          return !btn.hasAttribute('disabled') && !(btn as HTMLButtonElement).disabled;
-        },
-        '[data-testid="save-button-icon"]',
-        { timeout: 15000 }
-      );
+      await expect(this.header.saveBtn).toBeEnabled({ timeout: 15000 });
 
       await this.header.saveBtn.click();
       await this.waitForNetworkIdle();
@@ -125,19 +150,7 @@ export class ShechelPage extends MainPage {
       await icon.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
 
       if (await icon.isVisible({ timeout: 3000 }).catch(() => false)) {
-        await this.page.waitForFunction(
-          (testId) => {
-            const el = document.querySelector(`[data-testid="${testId}"]`);
-            if (!el) return false;
-            const btn = el.closest('button') || el.parentElement?.closest('button') || el;
-            const style = window.getComputedStyle(el);
-            return !btn.hasAttribute('disabled') &&
-                   !(btn as HTMLButtonElement).disabled &&
-                   style.pointerEvents !== 'none';
-          },
-          `row-delete-trigger-icon-${materialId}`,
-          { timeout: 15000 }
-        );
+        await expect(icon).toBeEnabled({ timeout: 15000 });
         await icon.click();
         console.log(`[deleteMakat] Delete trigger icon clicked for material ${materialId}`);
       } else {
@@ -179,9 +192,9 @@ export class ShechelPage extends MainPage {
       // Resolve the cell for this unit. Top-level units use `row-cell-...`,
       // children of an expanded row use `sub-row-cell-...`, and group/leaf
       // cells use `numbered-cell-...`. Try them in order of likelihood.
-      let cell = this.page.locator(`[data-testid="row-cell-${materialId}-${unitId}"]`).first();
+      let cell = this.rowCell(materialId, unitId);
       if (!(await cell.count())) {
-        cell = this.page.locator(`[data-testid="sub-row-cell-${materialId}-${unitId}"]`).first();
+        cell = this.subRowCell(materialId, unitId);
       }
       if (!(await cell.count())) {
         cell = this.numberedCell(materialId, unitId);
@@ -212,11 +225,8 @@ export class ShechelPage extends MainPage {
           // setLeafCellValues can find the leaf cells immediately after.
           if (i > 0) {
             const parentUnitId = unitsToExpand[i - 1];
-            await this.page
-              .waitForSelector(
-                `[data-testid="sub-row-cells-wrapper-${materialId}-${parentUnitId}"]`,
-                { state: 'visible', timeout: 10_000 }
-              )
+            await this.subRowCellsWrapperFor(materialId, parentUnitId)
+              .waitFor({ state: 'visible', timeout: 10_000 })
               .catch(() => {
                 console.warn(
                   `[expandHierarchyToLeaf] sub-row-cells-wrapper for parent ${parentUnitId} did not appear in time.`
@@ -236,22 +246,14 @@ export class ShechelPage extends MainPage {
       // Wait for the next level to render (look for either kind of cell)
       if (i + 1 < unitsToExpand.length) {
         const nextUnit = unitsToExpand[i + 1];
-        const nextCell = this.page.locator(
-          `[data-testid="row-cell-${materialId}-${nextUnit}"], [data-testid="sub-row-cell-${materialId}-${nextUnit}"], [data-testid*="numbered-cell-${materialId}-${nextUnit}"]`
-        ).first();
+        const nextCell = this.cellForUnit(materialId, nextUnit);
         await nextCell.waitFor({ state: 'visible', timeout: 10000 }).catch(() => {
           console.warn(`[expandHierarchyToLeaf] Next-level cell for unit ${nextUnit} did not appear in time.`);
         });
       } else {
         // Last expansion in the path: wait for the leaf's children container
-        // (`sub-row-cells-wrapper-${mat}-${unit}`) to actually render.
-        // Without this, setLeafCellValues runs against an empty subtree and
-        // silently finds 0 cells.
-        await this.page
-          .waitForSelector(
-            `[data-testid="sub-row-cells-wrapper-${materialId}-${unitId}"]`,
-            { state: 'visible', timeout: 10_000 }
-          )
+        await this.subRowCellsWrapperFor(materialId, unitId)
+          .waitFor({ state: 'visible', timeout: 10_000 })
           .catch(() => {
             console.warn(
               `[expandHierarchyToLeaf] sub-row-cells-wrapper for unit ${unitId} did not appear in time.`
@@ -302,9 +304,7 @@ export class ShechelPage extends MainPage {
       let parentUnitId: number | null = null;
       let wrapper: Locator | null = null;
       for (let i = unitsToExpand.length - 1; i >= 0; i--) {
-        const candidate = this.page
-          .locator(`[data-testid="sub-row-cells-wrapper-${materialId}-${unitsToExpand[i]}"]`)
-          .first();
+        const candidate = this.subRowCellsWrapperFor(materialId, unitsToExpand[i]);
         if (await candidate.count()) {
           if (await candidate.isVisible({ timeout: 5000 }).catch(() => false)) {
             parentUnitId = unitsToExpand[i];
@@ -362,9 +362,7 @@ export class ShechelPage extends MainPage {
       // (i.e. they are actual parent nodes, not leaf siblings).
       const actualParents = new Set<string>();
       for (const uid of childUnitIds) {
-        const childWrapper = wrapper!.locator(
-          `[data-testid="sub-row-cells-wrapper-${materialId}-${uid}"]`
-        ).first();
+        const childWrapper = this.subRowCellsWrapperFor(materialId, parseInt(uid, 10));
         if (await childWrapper.count() && await childWrapper.isVisible({ timeout: 500 }).catch(() => false)) {
           actualParents.add(uid);
         }
@@ -381,12 +379,8 @@ export class ShechelPage extends MainPage {
       //        button we can change its value; if not, it's a fixed-value cell — skip it.
       for (const unitId of leafChildren) {
         try {
-          const chipZero = wrapper
-            .locator(`[data-testid="chip-zero-cell-${materialId}-${unitId}"]`)
-            .first();
-          const numberedGroup = wrapper
-            .locator(`[data-testid="numberfield-group-numbered-cell-${materialId}-${unitId}"]`)
-            .first();
+          const chipZero = this.chipZeroCell(wrapper!, materialId, unitId);
+          const numberedGroup = this.numberedGroupCell(wrapper!, materialId, unitId);
 
           // Determine which variant is currently rendered.
           const isChipZero = await chipZero.isVisible({ timeout: 500 }).catch(() => false);
@@ -410,9 +404,7 @@ export class ShechelPage extends MainPage {
             }
           } else if (isNumbered) {
             // Already a numbered cell – read current value.
-            const inputField = numberedGroup
-              .locator('[data-testid*="input"]')
-              .first();
+            const inputField = this.cellInputField(numberedGroup);
             try {
               currentValue = parseInt(
                 (await inputField.inputValue().catch(() => '0')) || '0',
@@ -427,12 +419,8 @@ export class ShechelPage extends MainPage {
           }
 
           // After (optional) activation, the cell should be a numberfield-group.
-          const incrementBtn = wrapper
-            .locator(`[data-testid="numberfield-increment-numbered-cell-${materialId}-${unitId}"]`)
-            .first();
-          const inputField = numberedGroup
-            .locator('[data-testid*="input"]')
-            .first();
+          const incrementBtn = this.incrementButton(wrapper!, materialId, unitId);
+          const inputField = this.cellInputField(numberedGroup);
 
           // If the increment button isn't actually visible, skip this cell.
           const incrementVisible = await incrementBtn.isVisible({ timeout: 500 }).catch(() => false);
@@ -545,18 +533,16 @@ export class ShechelPage extends MainPage {
       for (let i = 0; i <= parentIndex; i++) {
         // Try the expand tooltip first, then fall back to the accordion trigger
         const expandTooltip = this.hierarchyExpandTooltip(newHierarchy[i]);
-        const accordionTrigger = this.page.locator(
-          `[data-testid="accordion-trigger-unit-hierarchy-node-accordion-${newHierarchy[i]}"]`
-        );
+        const accordion = this.accordionTrigger(newHierarchy[i]);
 
         const tooltipVisible = await expandTooltip.isVisible({ timeout: 2000 }).catch(() => false);
         if (tooltipVisible) {
           await expandTooltip.click();
           await this.page.waitForTimeout(500);
         } else {
-          const accordionVisible = await accordionTrigger.isVisible({ timeout: 2000 }).catch(() => false);
+          const accordionVisible = await accordion.isVisible({ timeout: 2000 }).catch(() => false);
           if (accordionVisible) {
-            await accordionTrigger.click();
+            await accordion.click();
             await this.page.waitForTimeout(500);
           }
         }
@@ -580,13 +566,11 @@ export class ShechelPage extends MainPage {
     await this.waitForNetworkIdle();
 
     // Confirm and lock directly (drawer is already open from ensureDrawerOpen above)
-    const closeTrigger = this.page.getByTestId('dialog-trigger-unit-hierarchy-header-confirmation-popup');
-    await closeTrigger.waitFor({ state: 'visible', timeout: 3000 });
-    await closeTrigger.click();
+    await this.header.confirmationPopupTrigger.waitFor({ state: 'visible', timeout: 3000 });
+    await this.header.confirmationPopupTrigger.click();
 
-    const confirmBtn = this.page.getByTestId('unit-hierarchy-header-confirmation-popup-confirm-button');
-    await confirmBtn.waitFor({ state: 'visible', timeout: 3000 });
-    await confirmBtn.click();
+    await this.header.confirmationPopupConfirmBtn.waitFor({ state: 'visible', timeout: 3000 });
+    await this.header.confirmationPopupConfirmBtn.click();
     await this.waitForNetworkIdle();
 
     // Close the drawer
