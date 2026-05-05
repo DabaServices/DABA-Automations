@@ -38,18 +38,12 @@ test_hierarchicalChangeValuePreservationData.forEach((testData) => {
       // Unlock all units in both old and new hierarchy paths (including parent units)
       await unlockCompleteHierarchy(request, originalHierarchy, newHierarchy);
 
-      // *** CRITICAL: PAGE RELOAD BELOW ENSURES UI REFLECTS UNLOCK STATE BEFORE DRAWER OPERATIONS ***
       // Refresh the page so UI reflects the unlock changes
       await hierarchyPage.page.reload();
       await hierarchyPage.page.waitForLoadState('networkidle');
 
       // STEP 5: Move unit via UI (drawer)
       await hierarchyPage.unitMoveUI(unitToMove, newParentUnit, newHierarchy);
-
-      // STEP 6: Lock units back using API - lock both top-level parents (original and new)
-      // const topParentOriginal = originalHierarchy[0]; // Top parent from original hierarchy
-      // const topParentNew = newHierarchy[0]; // Top parent from new hierarchy
-      // await lockCompleteHierarchy(request, [topParentOriginal, topParentNew]);
 
       console.log(`  ✓ All operations completed`);
     } catch (error) {
@@ -116,15 +110,10 @@ test_hierarchicalChangeAggregationData.forEach((testData) => {
       // STEP 5: Move unit via API
       await updateUnitHierarchy(request, unitToMove, newParentUnit, 1, hatunit);
       
-      // STEP 6: Lock units back using drawer UI
-      await hierarchyPage.page.reload();
-      await hierarchyPage.page.waitForLoadState('networkidle');
-      await hierarchyPage.confirmAndLockHierarchyViaDrawer();
-      
-      // ALTERNATIVE STEP 6: Lock units back using API - lock both top-level parents (original and new)
-      // const topParentOriginal = originalHierarchy[0]; // Top parent from original hierarchy
-      // const topParentNew = newHierarchy[0]; // Top parent from new hierarchy
-      // await lockCompleteHierarchy(request, [topParentOriginal, topParentNew]);
+      // STEP 6: Lock units back using API
+      const topParentOriginal = originalHierarchy[0];
+      const topParentNew = newHierarchy[0];
+      await lockCompleteHierarchy(request, [topParentOriginal, topParentNew]);
 
     } catch (error) {
       console.error(`Error during move: ${error}`);
@@ -182,15 +171,10 @@ test_hierarchicalChangeOldHierarchyAggregationData.forEach((testData) => {
       // STEP 5: Move unit via API
       await updateUnitHierarchy(request, unitToMove, newParentUnit, 1, hatunit);
 
-      // STEP 6: Lock units back using drawer UI
-      await hierarchyPage.page.reload();
-      await hierarchyPage.page.waitForLoadState('networkidle');
-      await hierarchyPage.confirmAndLockHierarchyViaDrawer();
-
-      // ALTERNATIVE STEP 6: Lock units back using API - lock both top-level parents (original and new)
-      // const topParentOriginal = originalHierarchy[0]; // Top parent from original hierarchy
-      // const topParentNew = newHierarchy[0]; // Top parent from new hierarchy
-      // await lockCompleteHierarchy(request, [topParentOriginal, topParentNew]);
+      // STEP 6: Lock units back using API
+      const topParentOriginal = originalHierarchy[0];
+      const topParentNew = newHierarchy[0];
+      await lockCompleteHierarchy(request, [topParentOriginal, topParentNew]);
 
     } catch (error) {
       console.error(`Error during move: ${error}`);

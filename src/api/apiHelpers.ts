@@ -1,5 +1,6 @@
 import { APIRequestContext } from '@playwright/test';
 import { lockUnitStatus } from './lockunitstatus';
+import { reportUnits } from './reportUnits';
 import { BACKEND_URL } from '../../playwright.config';
 
 /**
@@ -118,6 +119,10 @@ export const lockCompleteHierarchy = async (
   console.info(`[lockCompleteHierarchy] Locking units: [${effectiveUnits.join(', ')}]${isLockAll ? ' (all top-level units)' : ''}`);
 
   try {
+    // Call report API before locking (isLaunching = false)
+    const allTopLevelUnits = await fetchAllTopLevelUnits(request);
+    await reportUnits(request, effectiveUnits, allTopLevelUnits, false, rootFather);
+
     // When locking all top units, skip updateHierarchy to avoid server hanging on recalculation
     await lockUnitStatus(request, effectiveUnits, rootFather, 1, undefined, isLockAll ? false : undefined);
     console.info(`[lockCompleteHierarchy] Successfully locked all ${effectiveUnits.length} units`);
