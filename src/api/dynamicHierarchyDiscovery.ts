@@ -2,7 +2,7 @@ import { APIRequestContext } from '@playwright/test';
 import { BACKEND_URL } from '../../playwright.config';
 
 /**
- * hierarchyHelper.ts
+ * dynamicHierarchyDiscovery.ts
  *
  * Helper utilities for dynamically discovering hierarchy data from the live
  * backend instead of relying on hardcoded unit IDs in test data files.

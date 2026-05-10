@@ -1,0 +1,384 @@
+{
+  "test_hierarchicalChangeValuePreservation": [
+    {
+      "materialId": "000000006",
+      "description": "Value Preservation - Move Ugda(20) from Pikud(2) to Pikud(3) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        20
+      ],
+      "newHierarchy": [
+        3,
+        20
+      ],
+      "unitToMove": 20,
+      "newParentUnit": 3,
+      "oldParentUnit": 2
+    },
+    {
+      "materialId": "000000007",
+      "description": "Value Preservation - Move Ugda(21) from Pikud(3) to Matkal(1) [INSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        3,
+        21
+      ],
+      "newHierarchy": [
+        21
+      ],
+      "unitToMove": 21,
+      "newParentUnit": 1,
+      "oldParentUnit": 3
+    },
+    {
+      "materialId": "000000008",
+      "description": "Value Preservation - Move Hativa(119) from Ugda(29) to Pikud(4) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        29,
+        119
+      ],
+      "newHierarchy": [
+        4,
+        119
+      ],
+      "unitToMove": 119,
+      "newParentUnit": 4,
+      "oldParentUnit": 29
+    },
+    {
+      "materialId": "000000009",
+      "description": "Value Preservation - Move Hativa(128) from Ugda(38) to Pikud(2) [INSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        38,
+        128
+      ],
+      "newHierarchy": [
+        2,
+        128
+      ],
+      "unitToMove": 128,
+      "newParentUnit": 2,
+      "oldParentUnit": 38
+    },
+    {
+      "materialId": "000000010",
+      "description": "Value Preservation - Move Hativa(137) from Ugda(47) to Pikud(5) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        47,
+        137
+      ],
+      "newHierarchy": [
+        5,
+        137
+      ],
+      "unitToMove": 137,
+      "newParentUnit": 5,
+      "oldParentUnit": 47
+    },
+    {
+      "materialId": "000000011",
+      "description": "Value Preservation - Move Hativa(105) from Ugda(15) to Pikud(6) [INSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        6,
+        15,
+        105
+      ],
+      "newHierarchy": [
+        6,
+        105
+      ],
+      "unitToMove": 105,
+      "newParentUnit": 6,
+      "oldParentUnit": 15
+    },
+    {
+      "materialId": "000000012",
+      "description": "Value Preservation - Move Gdud(509) from Hativa(209) to Pikud(7) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        29,
+        209,
+        509
+      ],
+      "newHierarchy": [
+        7,
+        509
+      ],
+      "unitToMove": 509,
+      "newParentUnit": 7,
+      "oldParentUnit": 209
+    },
+    {
+      "materialId": "000000013",
+      "description": "Value Preservation - Move Gdud(407) from Hativa(107) to Pikud(8) [INSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        8,
+        17,
+        107,
+        407
+      ],
+      "newHierarchy": [
+        8,
+        407
+      ],
+      "unitToMove": 407,
+      "newParentUnit": 8,
+      "oldParentUnit": 107
+    },
+    {
+      "materialId": "000000014",
+      "description": "Value Preservation - Move Gdud(599) from Hativa(299) to Pikud(9) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        29,
+        299,
+        599
+      ],
+      "newHierarchy": [
+        9,
+        599
+      ],
+      "unitToMove": 599,
+      "newParentUnit": 9,
+      "oldParentUnit": 299
+    },
+    {
+      "materialId": "000000015",
+      "description": "Value Preservation - Move Gdud(409) from Hativa(109) to Pikud(10) [INSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        10,
+        19,
+        109,
+        409
+      ],
+      "newHierarchy": [
+        10,
+        409
+      ],
+      "unitToMove": 409,
+      "newParentUnit": 10,
+      "oldParentUnit": 109
+    },
+    {
+      "materialId": "000000016",
+      "description": "Value Preservation - Move Gdud(689) from Hativa(389) to Ugda(38) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        29,
+        389,
+        689
+      ],
+      "newHierarchy": [
+        2,
+        38,
+        689
+      ],
+      "unitToMove": 689,
+      "newParentUnit": 38,
+      "oldParentUnit": 389
+    }
+  ],
+  "test_hierarchicalChangeAggregation": [
+    {
+      "materialId": "000000017",
+      "description": "Aggregation Verification - Move Hativa(146) from Ugda(56) to Ugda(29) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        56,
+        146
+      ],
+      "newHierarchy": [
+        2,
+        29,
+        146
+      ],
+      "unitToMove": 146,
+      "newParentUnit": 29,
+      "oldParentUnit": 56
+    },
+    {
+      "materialId": "000000018",
+      "description": "Aggregation Verification - Move Hativa(155) from Ugda(65) to Ugda(47) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        65,
+        155
+      ],
+      "newHierarchy": [
+        2,
+        47,
+        155
+      ],
+      "unitToMove": 155,
+      "newParentUnit": 47,
+      "oldParentUnit": 65
+    },
+    {
+      "materialId": "000000019",
+      "description": "Aggregation Verification - Move Gdud(518) from Hativa(218) to Ugda(56) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        38,
+        218,
+        518
+      ],
+      "newHierarchy": [
+        2,
+        56,
+        518
+      ],
+      "unitToMove": 518,
+      "newParentUnit": 56,
+      "oldParentUnit": 218
+    },
+    {
+      "materialId": "000000020",
+      "description": "Aggregation Verification - Move Gdud(608) from Hativa(308) to Ugda(65) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        38,
+        308,
+        608
+      ],
+      "newHierarchy": [
+        2,
+        65,
+        608
+      ],
+      "unitToMove": 608,
+      "newParentUnit": 65,
+      "oldParentUnit": 308
+    },
+    {
+      "materialId": "000000021",
+      "description": "Aggregation Verification - Move Gdud(698) from Hativa(398) to Ugda(74) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        38,
+        398,
+        698
+      ],
+      "newHierarchy": [
+        2,
+        74,
+        698
+      ],
+      "unitToMove": 698,
+      "newParentUnit": 74,
+      "oldParentUnit": 398
+    }
+  ],
+  "test_hierarchicalChangeOldHierarchyAggregation": [
+    {
+      "materialId": "000000022",
+      "description": "Old Hierarchy Aggregation - Move Hativa(164) from Ugda(74) to Ugda(83) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        74,
+        164
+      ],
+      "newHierarchy": [
+        2,
+        83,
+        164
+      ],
+      "unitToMove": 164,
+      "newParentUnit": 83,
+      "oldParentUnit": 74
+    },
+    {
+      "materialId": "000000023",
+      "description": "Old Hierarchy Aggregation - Move Hativa(173) from Ugda(83) to Ugda(92) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        83,
+        173
+      ],
+      "newHierarchy": [
+        2,
+        92,
+        173
+      ],
+      "unitToMove": 173,
+      "newParentUnit": 92,
+      "oldParentUnit": 83
+    },
+    {
+      "materialId": "000000024",
+      "description": "Old Hierarchy Aggregation - Move Gdud(527) from Hativa(227) to Ugda(11) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        47,
+        227,
+        527
+      ],
+      "newHierarchy": [
+        2,
+        11,
+        527
+      ],
+      "unitToMove": 527,
+      "newParentUnit": 11,
+      "oldParentUnit": 227
+    },
+    {
+      "materialId": "000000025",
+      "description": "Old Hierarchy Aggregation - Move Gdud(617) from Hativa(317) to Ugda(30) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        47,
+        317,
+        617
+      ],
+      "newHierarchy": [
+        3,
+        30,
+        617
+      ],
+      "unitToMove": 617,
+      "newParentUnit": 30,
+      "oldParentUnit": 317
+    },
+    {
+      "materialId": "000000026",
+      "description": "Old Hierarchy Aggregation - Move Gdud(536) from Hativa(236) to Ugda(39) [OUTSIDE]",
+      "hatunit": 1,
+      "unitsToExpand": [
+        2,
+        56,
+        236,
+        536
+      ],
+      "newHierarchy": [
+        3,
+        39,
+        536
+      ],
+      "unitToMove": 536,
+      "newParentUnit": 39,
+      "oldParentUnit": 236
+    }
+  ]
+}

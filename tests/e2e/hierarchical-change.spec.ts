@@ -1,5 +1,5 @@
 import { test, expect } from '../../src/fixtures';
-import aggregationData from '../../src/testData/aggregationData.json';
+import aggregationData from '../../src/testData/changeHierarchyData.json';
 import {
   unlockCompleteHierarchy,
   lockCompleteHierarchy,

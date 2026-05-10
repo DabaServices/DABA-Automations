@@ -1,0 +1,28 @@
+{
+  "randomDataCount": 2,
+  "hierarchicalAggregationTestData": [],
+  "makatValidationTestData": [
+    {
+      "index": 0,
+      "materialId": "000000027",
+      "description": "Material 1 - Basic Validation"
+    }
+  ],
+  "hierarchyExpansionTestData": [],
+  "leafCellClickabilityTestData": [],
+  "saveFunctionalityTestData": [],
+  "commentFunctionalityTestData": [
+    {
+      "materialId": "000000028",
+      "description": "Add Comment to Material Test",
+      "commentText": "This is a test comment added via smoke test",
+      "rowIndex": 0
+    }
+  ],
+  "deleteMakatTestData": [
+    {
+      "materialId": "000000029",
+      "description": "Delete Material from Table Test"
+    }
+  ]
+}

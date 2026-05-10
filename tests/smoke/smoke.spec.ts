@@ -1,7 +1,7 @@
 import { test, expect } from '../../src/fixtures';
-import smokeData from '../../src/testData/smokeData.json';
+import regularTestsData from '../../src/testData/regularTestsData.json';
 
-const { makatValidationTestData, hierarchyExpansionTestData, leafCellClickabilityTestData, saveFunctionalityTestData, commentFunctionalityTestData, deleteMakatTestData } = smokeData;
+const { makatValidationTestData, hierarchyExpansionTestData, leafCellClickabilityTestData, saveFunctionalityTestData, commentFunctionalityTestData, deleteMakatTestData } = regularTestsData;
 
 
 // ============ Smoke Test 1: Makat Table Validation ============

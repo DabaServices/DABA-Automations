@@ -1,7 +1,7 @@
 import { test, expect } from '../../src/fixtures';
-import aggregationData from '../../src/testData/aggregationData.json';
+import regularTestsData from '../../src/testData/regularTestsData.json';
 
-const hierarchicalAggregationTestData = aggregationData.hierarchicalAggregationTestData;
+const hierarchicalAggregationTestData = regularTestsData.hierarchicalAggregationTestData;
 
 /**
  * E2E Test Suite: Hierarchical Aggregation Verification

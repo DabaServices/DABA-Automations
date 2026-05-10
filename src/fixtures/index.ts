@@ -2,8 +2,8 @@ import { test as base } from '@playwright/test';
 import { ShechelPage } from '../pages/ShechelPage';
 import { ensureTestHierarchy, buildHierarchyFromPath } from '../api/hierarchyCheck';
 import { lockCompleteHierarchy } from '../api/apiHelpers';
-import aggregationData from '../testData/aggregationData.json';
-import smokeData from '../testData/smokeData.json';
+import aggregationData from '../testData/changeHierarchyData.json';
+import regularTestsData from '../testData/regularTestsData.json';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // setupByTitle – ONE map for ALL tests
@@ -33,7 +33,7 @@ const setupByTitle = new Map<string, TestSetupData>();
 // If it also has `newHierarchy` + `unitToMove`, the destination prefix is computed.
 const allDataSources: Record<string, unknown> = {
   ...aggregationData,
-  ...smokeData,
+  ...regularTestsData,
 };
 
 for (const [dataSetName, entries] of Object.entries(allDataSources)) {

@@ -1,0 +1,23 @@
+ {
+ "test_hierarchicalChangeValuePreservation": [
+   {
+     "materialId": "000000006",
+     "description": "Value Preservation",
+     "hatunit": 1
+   }
+ ],
+ "test_hierarchicalChangeAggregation": [
+   {
+     "materialId": "000000006",
+     "description": "Aggregation Verification",
+     "hatunit": 1
+   }
+ ],
+ "test_hierarchicalChangeOldHierarchyAggregation": [
+   {
+     "materialId": "000000006",
+     "description": "Old Hierarchy Aggregation",
+     "hatunit": 1
+   }
+ ]
+}
