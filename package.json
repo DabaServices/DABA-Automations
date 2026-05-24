@@ -6,8 +6,7 @@
     "test": "playwright test",
     "build:data": "tsx scripts/data-builder.ts",
     "build:data:regular": "TEST_TYPE=REGULAR npm run build:data",
-    "build:data:hierarchy": "TEST_TYPE=HIERARCHY_CHANGE npm run build:data",
-    "build:data:refresh": "DATA_BUILDER_REFRESH=1 npm run build:data"
+    "build:data:hierarchy": "TEST_TYPE=HIERARCHY_CHANGE npm run build:data"
   },
   "keywords": [],
   "author": "",

@@ -1,4 +1,5 @@
 import { test, expect } from '../../src/fixtures';
+import { withPhase } from '../../src/fixtures/withPhase';
 import regularTestsData from '../../src/testData/regularTestsData.json';
 
 const { makatValidationTestData, hierarchyExpansionTestData, leafCellClickabilityTestData, saveFunctionalityTestData, commentFunctionalityTestData, deleteMakatTestData } = regularTestsData;
@@ -9,18 +10,18 @@ makatValidationTestData.forEach((testData) => {
   test(
     `makatValidationTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
-      try {
-        // Add material from dropdown
-        await hierarchyPage.addMakatFromDropdown(testData.materialId);
-        
-        // Verify material was added to the table
-        const makatAdded = await hierarchyPage.verifyMaterialIdInRow(testData.materialId);
-        expect(makatAdded).toBe(true);
-        console.log(`✓ Material ${testData.materialId} successfully added to table`);
-      } catch (error) {
-        console.error(`✗ Test failed: ${error}`);
-        throw error;
-      }
+      const ctx = { makatId: testData.materialId };
+      await withPhase('Add makat from dropdown', ctx, () =>
+        hierarchyPage.addMakatFromDropdown(testData.materialId),
+      );
+      const makatAdded = await withPhase('Verify material in row', ctx, () =>
+        hierarchyPage.verifyMaterialIdInRow(testData.materialId),
+      );
+      expect(
+        makatAdded,
+        `[ASSERTION: makat-not-in-row] Material ${testData.materialId} was not found in the table after being added from the dropdown.`,
+      ).toBe(true);
+      console.log(`✓ Material ${testData.materialId} successfully added to table`);
     }
   );
 });
@@ -30,15 +31,22 @@ hierarchyExpansionTestData.forEach((testData) => {
   test(
     `hierarchyExpansionTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
-      // Select material from dropdown and add it
-      await hierarchyPage.addMakatFromDropdown(testData.materialId);
-      
-      // Expand hierarchy through the specified path
-      await hierarchyPage.expandHierarchyToLeaf(
-        testData.materialId,
-        testData.unitsToExpand
+      const ctx = {
+        makatId: testData.materialId,
+        unitsToExpand: testData.unitsToExpand,
+      };
+      await withPhase('Add makat from dropdown', ctx, () =>
+        hierarchyPage.addMakatFromDropdown(testData.materialId),
       );
-      console.log(`✓ Hierarchy expanded through path: [${testData.unitsToExpand.join(' → ')}]`);
+      await withPhase('Expand hierarchy to leaf', ctx, () =>
+        hierarchyPage.expandHierarchyToLeaf(
+          testData.materialId,
+          testData.unitsToExpand,
+        ),
+      );
+      console.log(
+        `✓ Hierarchy expanded through path: [${testData.unitsToExpand.join(' → ')}]`,
+      );
     }
   );
 });
@@ -48,15 +56,30 @@ leafCellClickabilityTestData.forEach((testData) => {
   test(
     `leafCellClickabilityTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
-      // Select material from dropdown and add it
-      await hierarchyPage.addMakatFromDropdown(testData.materialId);
-      
-      // Expand hierarchy
-      await hierarchyPage.expandHierarchyToLeaf(testData.materialId, testData.unitsToExpand);
-      
-      // Set values in leaf cells
-      const leafValues = await hierarchyPage.setLeafCellValues(testData.materialId, testData.unitsToExpand, 1);
-      expect(leafValues.size).toBeGreaterThan(0);
+      const ctx = {
+        makatId: testData.materialId,
+        unitsToExpand: testData.unitsToExpand,
+      };
+      await withPhase('Add makat from dropdown', ctx, () =>
+        hierarchyPage.addMakatFromDropdown(testData.materialId),
+      );
+      await withPhase('Expand hierarchy to leaf', ctx, () =>
+        hierarchyPage.expandHierarchyToLeaf(
+          testData.materialId,
+          testData.unitsToExpand,
+        ),
+      );
+      const leafValues = await withPhase('Set leaf cell values', ctx, () =>
+        hierarchyPage.setLeafCellValues(
+          testData.materialId,
+          testData.unitsToExpand,
+          1,
+        ),
+      );
+      expect(
+        leafValues.size,
+        `[ASSERTION: no-leaf-cells-set] setLeafCellValues did not set any cells for material ${testData.materialId} on path [${testData.unitsToExpand.join(' → ')}].`,
+      ).toBeGreaterThan(0);
       console.log(`✓ Successfully set values in ${leafValues.size} leaf cells`);
     }
   );
@@ -68,37 +91,57 @@ saveFunctionalityTestData.forEach((testData) => {
   test(
     `saveFunctionalityTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
-      try {
-        // Select material from dropdown and add it
-        await hierarchyPage.addMakatFromDropdown(testData.materialId);
-        
-        // Expand hierarchy
-        await hierarchyPage.expandHierarchyToLeaf(testData.materialId, testData.unitsToExpand);
-        
-        // Set values in leaf cells
-        await hierarchyPage.setLeafCellValues(testData.materialId, testData.unitsToExpand, testData.testValue);
-        
-        // Save material - this clicks the save button and waits for network idle
-        await hierarchyPage.saveMaterial();
-        
-        // Verify save worked by checking material is still visible after save
-        let isMaterialInRow = await hierarchyPage.verifyMaterialIdInRow(testData.materialId);
-        expect(isMaterialInRow).toBe(true);
-        console.log(`✓ Material still visible after save`);
-        
-        // Strong verification: Reload the page and check if material still appears
-        // This proves the save actually persisted to the database
+      const ctx = {
+        makatId: testData.materialId,
+        unitsToExpand: testData.unitsToExpand,
+        testValue: testData.testValue,
+      };
+      await withPhase('Add makat from dropdown', ctx, () =>
+        hierarchyPage.addMakatFromDropdown(testData.materialId),
+      );
+      await withPhase('Expand hierarchy to leaf', ctx, () =>
+        hierarchyPage.expandHierarchyToLeaf(
+          testData.materialId,
+          testData.unitsToExpand,
+        ),
+      );
+      await withPhase('Set leaf cell values', ctx, () =>
+        hierarchyPage.setLeafCellValues(
+          testData.materialId,
+          testData.unitsToExpand,
+          testData.testValue,
+        ),
+      );
+      await withPhase('Save material', ctx, () => hierarchyPage.saveMaterial());
+
+      let isMaterialInRow = await withPhase(
+        'Verify material in row after save',
+        ctx,
+        () => hierarchyPage.verifyMaterialIdInRow(testData.materialId),
+      );
+      expect(
+        isMaterialInRow,
+        `[ASSERTION: makat-missing-after-save] Material ${testData.materialId} disappeared from the table after Save was clicked.`,
+      ).toBe(true);
+      console.log(`✓ Material still visible after save`);
+
+      await withPhase('Reload page after save', ctx, async () => {
         await hierarchyPage.page.reload();
         await hierarchyPage.page.waitForLoadState('networkidle');
-        
-        // After reload, verify the material is still in the table
-        isMaterialInRow = await hierarchyPage.verifyMaterialIdInRow(testData.materialId);
-        expect(isMaterialInRow).toBe(true);
-        console.log(`✓ Save functionality verified: Material ${testData.materialId} persisted after page reload`);
-      } catch (error) {
-        console.error(`✗ Save test failed: ${error}`);
-        throw error;
-      }
+      });
+
+      isMaterialInRow = await withPhase(
+        'Verify material in row after reload',
+        ctx,
+        () => hierarchyPage.verifyMaterialIdInRow(testData.materialId),
+      );
+      expect(
+        isMaterialInRow,
+        `[ASSERTION: makat-not-persisted] Material ${testData.materialId} did NOT persist after page reload — save was not committed to the backend.`,
+      ).toBe(true);
+      console.log(
+        `✓ Save functionality verified: Material ${testData.materialId} persisted after page reload`,
+      );
     }
   );
 });
@@ -108,28 +151,40 @@ deleteMakatTestData.forEach((testData) => {
   test(
     `deleteMakatTestData[${testData.description}]`,
     async ({ hierarchyPage }) => {
-      try {
-        // Step 1: Add material from dropdown
-        await hierarchyPage.addMakatFromDropdown(testData.materialId);
-        
-        // Step 2: Verify material was added to the table
-        let makatExists = await hierarchyPage.verifyMaterialIdInRow(testData.materialId);
-        expect(makatExists).toBe(true);
-        console.log(`✓ Material ${testData.materialId} successfully added to table`);
-        
-        // Step 3: Delete the material using the POM method
-        const deleteSuccess = await hierarchyPage.deleteMakat(testData.materialId);
-        expect(deleteSuccess).toBe(true);
-        console.log(`✓ Material ${testData.materialId} delete initiated successfully`);
-        
-        // Step 4: Verify material was deleted from the table
-        makatExists = await hierarchyPage.verifyMaterialIdInRow(testData.materialId);
-        expect(makatExists).toBe(false);
-        console.log(`✓ Material ${testData.materialId} successfully deleted from table`);
-      } catch (error) {
-        console.error(`✗ Delete test failed: ${error}`);
-        throw error;
-      }
+      const ctx = { makatId: testData.materialId };
+      await withPhase('Add makat from dropdown', ctx, () =>
+        hierarchyPage.addMakatFromDropdown(testData.materialId),
+      );
+      let makatExists = await withPhase(
+        'Verify material in row after add',
+        ctx,
+        () => hierarchyPage.verifyMaterialIdInRow(testData.materialId),
+      );
+      expect(
+        makatExists,
+        `[ASSERTION: makat-not-in-row] Material ${testData.materialId} was not in the table after being added (pre-delete check).`,
+      ).toBe(true);
+      console.log(`✓ Material ${testData.materialId} successfully added to table`);
+
+      const deleteSuccess = await withPhase('Delete makat', ctx, () =>
+        hierarchyPage.deleteMakat(testData.materialId),
+      );
+      expect(
+        deleteSuccess,
+        `[ASSERTION: delete-action-failed] deleteMakat returned false for material ${testData.materialId} — the delete UI action did not complete successfully.`,
+      ).toBe(true);
+      console.log(`✓ Material ${testData.materialId} delete initiated successfully`);
+
+      makatExists = await withPhase(
+        'Verify material removed from row',
+        ctx,
+        () => hierarchyPage.verifyMaterialIdInRow(testData.materialId),
+      );
+      expect(
+        makatExists,
+        `[ASSERTION: makat-still-present-after-delete] Material ${testData.materialId} is still in the table after a successful delete action.`,
+      ).toBe(false);
+      console.log(`✓ Material ${testData.materialId} successfully deleted from table`);
     }
   );
 });

@@ -76,29 +76,58 @@ export async function fetchHierarchyUnits(
   rootUnit: string = DEFAULT_ROOT_UNIT
 ): Promise<HierarchyUnit[]> {
   const url = `${HIERARCHY_URL}?user=${encodeURIComponent(user)}`;
-  const response = await request.get(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      authorization: 'Bearer',
-      unit: rootUnit,
-      screendate: screenDate,
-      user,
-    },
-  });
 
-  if (!response.ok()) {
-    throw new Error(
-      `[fetchHierarchyUnits] GET ${url} failed with status ${response.status()}`
-    );
-  }
+  // Retry transient network errors (DNS drop, connection reset, 5xx) up to
+  // 4 times with exponential backoff. Each retry waits longer to give the
+  // network/backend time to recover.
+  const maxAttempts = 4;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const response = await request.get(url, {
+        headers: {
+          'Content-Type': 'application/json',
+          authorization: 'Bearer',
+          unit: rootUnit,
+          screendate: screenDate,
+          user,
+        },
+        timeout: 20_000,
+      });
 
-  const body = await response.json();
-  const units: HierarchyUnit[] = body?.body?.data ?? body?.data ?? [];
-  if (!Array.isArray(units) || units.length === 0) {
-    throw new Error(`[fetchHierarchyUnits] Hierarchy response contained no units`);
+      if (!response.ok()) {
+        throw new Error(
+          `[fetchHierarchyUnits] GET ${url} failed with status ${response.status()}`
+        );
+      }
+
+      const body = await response.json();
+      const units: HierarchyUnit[] = body?.body?.data ?? body?.data ?? [];
+      if (!Array.isArray(units) || units.length === 0) {
+        throw new Error(`[fetchHierarchyUnits] Hierarchy response contained no units`);
+      }
+      console.info(`[fetchHierarchyUnits] Fetched ${units.length} units`);
+      return units;
+    } catch (e) {
+      lastError = e;
+      const msg = String((e as Error)?.message ?? e);
+      const isTransient =
+        msg.includes('ENOTFOUND') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('socket hang up') ||
+        /\b5\d\d\b/.test(msg);
+      if (attempt === maxAttempts || !isTransient) throw e;
+      const wait = 1000 * attempt; // 1s, 2s, 3s
+      console.warn(
+        `[fetchHierarchyUnits] attempt ${attempt}/${maxAttempts} failed (${msg.slice(0, 120)}); retrying in ${wait}ms…`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
   }
-  console.info(`[fetchHierarchyUnits] Fetched ${units.length} units`);
-  return units;
+  // Unreachable due to throw above, but TS needs a return.
+  throw lastError;
 }
 
 /**
@@ -185,4 +214,52 @@ export async function selectRandomGdudimWithLineage(
   );
 
   return lineages;
+}
+
+/**
+ * Poll the live `/units/hierarchy` endpoint until the given unit's parent
+ * matches `expectedParentId` (or the timeout expires).
+ *
+ * Why: after a hierarchy move (UI or API) the backend's per-material
+ * aggregation/rendering cache is briefly stale. `page.reload()` +
+ * `networkidle` is NOT enough because no requests are in-flight. Polling
+ * the canonical hierarchy endpoint guarantees the new parent → child link
+ * is visible to subsequent reads before the test continues.
+ *
+ * @param request          Playwright APIRequestContext
+ * @param unitId           Unit that was moved
+ * @param expectedParentId The parent it should now have
+ * @param timeoutMs        Total wait budget (default 15s)
+ * @param intervalMs       Poll interval (default 500ms)
+ * @returns true if confirmed, false if timed out
+ */
+export async function waitForUnitParent(
+  request: APIRequestContext,
+  unitId: number,
+  expectedParentId: number,
+  timeoutMs: number = 30_000,
+  intervalMs: number = 500,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let lastSeenParent: number | undefined;
+  while (Date.now() < deadline) {
+    try {
+      const units = await fetchHierarchyUnits(request);
+      const u = units.find((x) => x.id === unitId);
+      lastSeenParent = u?.parent?.id;
+      if (lastSeenParent === expectedParentId) {
+        console.info(
+          `[waitForUnitParent] Unit ${unitId} now has parent ${expectedParentId} ✓`,
+        );
+        return true;
+      }
+    } catch (e) {
+      console.warn(`[waitForUnitParent] poll failed: ${e}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  console.warn(
+    `[waitForUnitParent] Timed out waiting for unit ${unitId} to have parent ${expectedParentId} (last seen: ${lastSeenParent})`,
+  );
+  return false;
 }

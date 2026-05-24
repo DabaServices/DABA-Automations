@@ -159,6 +159,243 @@ export class MainPage {
   }
 
   /**
+   * The "next" arrow of the top-units carousel header. Clicking it advances
+   * the visible top-level units (rendered as `row-cell-${materialId}-…`)
+   * one page to the right. When all top units are already visible, the
+   * arrow is hidden / removed from the DOM.
+   */
+  protected carouselNextButton(): Locator {
+    return this.page.locator('[data-testid="content-header-carousel-next"]');
+  }
+
+  /**
+   * The "prev" arrow of the top-units carousel header. Used to RESET the
+   * carousel back to the leftmost page (which shows the lowest-numbered
+   * top-level units like 2, 5, 6, 7, 8, 9). The arrow has
+   * `data-disabled="true"` when we're already on the leftmost page.
+   */
+  protected carouselPrevButton(): Locator {
+    return this.page.locator('[data-testid="content-header-carousel-prev"]');
+  }
+
+  /**
+   * The carousel header label for a top-level unit (direct child of Matkal).
+   * This is the AUTHORITATIVE "is this top-level unit currently on the
+   * visible carousel page?" signal — it only exists in the DOM when the
+   * unit is on the page that the carousel is currently showing.
+   * Row-cells (`row-cell-${materialId}-${unitId}`) are unreliable for this
+   * because they can race with material-row hydration.
+   */
+  protected topUnitHeaderLabel(unitId: number): Locator {
+    return this.page.locator(
+      `[data-testid="typography-label-content-header-unit-${unitId}"]`,
+    );
+  }
+
+  /**
+   * Click the carousel "prev" arrow until it becomes disabled, resetting
+   * the visible top-units to the leftmost page. Safe to call at any time:
+   * if the prev arrow is missing or already disabled this is a no-op.
+   *
+   * Critical to call BEFORE `revealUnitInCarousel` / `expandHierarchyToLeaf`
+   * on retries — otherwise carousel state accumulates across attempts and
+   * we keep paginating further and further from the units we want.
+   */
+  protected async resetCarouselToLeftmost(maxClicks = 40): Promise<void> {
+    const prevBtn = this.carouselPrevButton();
+    for (let i = 0; i < maxClicks; i++) {
+      const disabled = await prevBtn
+        .first()
+        .getAttribute('data-disabled')
+        .catch(() => null);
+      if (disabled === 'true' || disabled === null) return;
+      await prevBtn
+        .first()
+        .click({ timeout: 2_000 })
+        .catch(() => undefined);
+      await this.page.waitForTimeout(50);
+    }
+  }
+
+  /**
+   * Reveal a top-level unit's `row-cell` in the carousel.
+   *
+   * Strategy:
+   *   1. Wait until the material row is fully hydrated — specifically,
+   *      until AT LEAST ONE `row-cell-${materialId}-*` testid is present
+   *      in the DOM. Right after addMakatFromDropdown / page reload, the
+   *      material row may render before its per-unit cells do; checking
+   *      for our specific unit too early returns 0 and triggers needless
+   *      pagination AWAY from a unit that was about to appear.
+   *   2. Now re-check our specific unit. If present, return.
+   *   3. Otherwise paginate "next" up to maxClicks times. The carousel
+   *      starts at the leftmost page and cannot scroll past it, so there
+   *      is no "prev" fallback.
+   */
+  protected async revealUnitInCarousel(
+    materialId: string,
+    unitId: number,
+    maxClicks = 40,
+  ): Promise<boolean> {
+    // AUTHORITATIVE source of truth: the carousel header label
+    // `typography-label-content-header-unit-${unitId}` only EXISTS in the
+    // DOM when the top-level unit is on the carousel's currently-visible
+    // page. Row-cells (`row-cell-${materialId}-${unitId}`) cannot be used
+    // for this — they can be DOM-attached even off-screen, AND they can
+    // race with material-row hydration. The header label is rendered by
+    // the carousel itself and is the same signal a human sees on screen.
+    const header = this.topUnitHeaderLabel(unitId);
+    const cell = this.rowCell(materialId, unitId);
+
+    const isUnitOnVisiblePage = async (): Promise<boolean> =>
+      (await header.count()) > 0;
+
+    if (await isUnitOnVisiblePage()) return true;
+
+    // Forward pagination only — the carousel starts at the leftmost page
+    // and cannot scroll left. Click the "next" arrow, re-check the
+    // header-label, repeat until the unit is on the visible page OR the
+    // next arrow disappears (= end of the list).
+    const nextBtn = this.carouselNextButton();
+    for (let i = 0; i < maxClicks; i++) {
+      const arrowVisible = await nextBtn
+        .first()
+        .isVisible({ timeout: 200 })
+        .catch(() => false);
+      if (!arrowVisible) {
+        console.info(
+          `[revealUnitInCarousel] Carousel "next" gone after ${i} clicks — unit ${unitId} not on any carousel page.`,
+        );
+        return await isUnitOnVisiblePage();
+      }
+
+      await nextBtn
+        .first()
+        .click({ timeout: 5_000 })
+        .catch(async (err) => {
+          console.warn(
+            `[revealUnitInCarousel] click failed (${String(err).slice(0, 80)}) — falling back to dispatchEvent`,
+          );
+          await nextBtn
+            .first()
+            .evaluate((el) => (el as HTMLElement).click())
+            .catch(() => undefined);
+        });
+      // Wait briefly for the carousel page swap to complete.
+      await this.page.waitForTimeout(150);
+
+      if (await isUnitOnVisiblePage()) {
+        console.info(
+          `[revealUnitInCarousel] Unit ${unitId} revealed after ${i + 1} carousel click(s).`,
+        );
+        // Best-effort: also wait for the material's row-cell to render
+        // under that header so downstream hover/click works immediately.
+        await cell
+          .first()
+          .waitFor({ state: 'attached', timeout: 2_000 })
+          .catch(() => undefined);
+        return true;
+      }
+    }
+    console.warn(
+      `[revealUnitInCarousel] Exhausted ${maxClicks} carousel clicks without revealing unit ${unitId}.`,
+    );
+    return await isUnitOnVisiblePage();
+  }
+
+  /**
+   * Poll the UI until the given unit's cell (top-level row, sub-row, or
+   * numbered) is actually present in the DOM. Use this AFTER a hierarchy
+   * move to ensure the UI has caught up with the backend before reading
+   * cell values.
+   *
+   * IMPORTANT: if `expandPath` is supplied, the hierarchy is expanded
+   * down that path on every attempt. This is required when `unitId` is
+   * NOT a top-level unit — top-level carousel pagination alone will never
+   * reveal a deep child. For top-level units only, omit `expandPath` and
+   * the carousel will be paginated instead.
+   *
+   * @returns true if the cell appeared within the budget, false otherwise.
+   */
+  async waitForUnitCellVisible(
+    materialId: string,
+    unitId: number,
+    opts: {
+      maxAttempts?: number;
+      intervalMs?: number;
+      reloadBetween?: boolean;
+      expandPath?: number[];
+    } = {},
+  ): Promise<boolean> {
+    const {
+      maxAttempts = 10,
+      intervalMs = 1500,
+      reloadBetween = true,
+      expandPath,
+    } = opts;
+    console.info(
+      `[waitForUnitCellVisible] DEBUG opts: ` +
+        `maxAttempts=${maxAttempts}, intervalMs=${intervalMs}, ` +
+        `reloadBetween=${reloadBetween}, expandPath=${expandPath ? `[${expandPath.join(',')}]` : 'NONE'}`,
+    );
+
+    const cellPresent = async (): Promise<boolean> => {
+      // Plain DOM-presence check: if any locator for this unit's cell
+      // resolves, the UI has rendered the row for it. We do NOT
+      // proactively check visibility — if the cell is in the DOM, trust
+      // it. Carousel pagination, when needed, is handled as a fallback
+      // by `expandHierarchyToLeaf` / `revealUnitInCarousel`.
+      const sel =
+        `[data-testid="row-cell-${materialId}-${unitId}"], ` +
+        `[data-testid="sub-row-cell-${materialId}-${unitId}"], ` +
+        `[data-testid*="numbered-cell-${materialId}-${unitId}"]`;
+      return (await this.page.locator(sel).count()) > 0;
+    };
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Reset the carousel to its leftmost page before each attempt.
+      // Without this, residual pagination state from previous attempts
+      // means subsequent expansions never see the low-numbered top units
+      // (e.g. unit 6) even though they're the units we want.
+      await this.resetCarouselToLeftmost().catch(() => undefined);
+
+      if (expandPath && expandPath.length > 0) {
+        // Deep child: walk the hierarchy each attempt so nested rows render.
+        // Cast through `any` to avoid a hard dep on the ShechelPage subclass.
+        const self = this as unknown as {
+          expandHierarchyToLeaf?: (m: string, p: number[]) => Promise<unknown>;
+        };
+        if (typeof self.expandHierarchyToLeaf === 'function') {
+          await self.expandHierarchyToLeaf(materialId, expandPath).catch(() => undefined);
+        }
+      } else {
+        // Top-level unit: it may be off-screen in the carousel — paginate.
+        await this.revealUnitInCarousel(materialId, unitId).catch(() => undefined);
+      }
+      if (await cellPresent()) {
+        console.info(
+          `[waitForUnitCellVisible] Unit ${unitId} cell found on attempt ${attempt}.`,
+        );
+        return true;
+      }
+      if (attempt < maxAttempts) {
+        console.info(
+          `[waitForUnitCellVisible] Unit ${unitId} not yet rendered (attempt ${attempt}/${maxAttempts}) — waiting ${intervalMs}ms${reloadBetween ? ' + reload' : ''}.`,
+        );
+        await this.page.waitForTimeout(intervalMs);
+        if (reloadBetween) {
+          await this.page.reload();
+          await this.page.waitForLoadState('networkidle');
+        }
+      }
+    }
+    console.warn(
+      `[waitForUnitCellVisible] Gave up: unit ${unitId} cell never appeared after ${maxAttempts} attempts.`,
+    );
+    return false;
+  }
+
+  /**
    * Resolves a visible sub-row container for a given parent unit, trying the
    * wrapper first and falling back to the inner cells container.
    */
@@ -498,6 +735,18 @@ export class MainPage {
     materialId: string,
     unitsToExpand: number[]
   ): Promise<Map<number, number>> {
+    // If the first unit on the path is a top-level unit that's currently
+    // off-screen in the paginated header carousel, scroll the carousel
+    // until it appears — otherwise its row-cell is not in the DOM and
+    // page.evaluate below would read 0.
+    if (unitsToExpand.length > 0) {
+      await this.revealUnitInCarousel(materialId, unitsToExpand[0]);
+      // Tiny settle so freshly-rendered cells finish hydrating their input
+      // values before page.evaluate reads them. Without this we sometimes
+      // capture "0" for a cell that's about to display a real number.
+      await this.page.waitForTimeout(250);
+    }
+
     const snapshot = await this.page.evaluate(
       ({ materialId, unitsToExpand }) => {
         // Helpers ────────────────────────────────────────────────────────
@@ -517,19 +766,31 @@ export class MainPage {
           return input?.value ?? '0';
         };
 
-        const getCellValueDom = (unitId: number): number => {
+        const getCellValueDom = (unitId: number): number | null => {
           const rowCell = document.querySelector(
             `[data-testid="row-cell-${materialId}-${unitId}"]`
           );
+          const subRowCell = document.querySelector(
+            `[data-testid="sub-row-cell-${materialId}-${unitId}"]`
+          );
+          const numbered = document.querySelector(
+            `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
+          );
+          // If NONE of the possible cell selectors exist, the unit is not
+          // currently rendered — return null so the caller can record it as
+          // missing (vs. silently reporting "0", which makes a missing unit
+          // indistinguishable from a real zero value).
+          if (!rowCell && !subRowCell && !numbered) return null;
+
           let raw = readInputValue(rowCell);
           if (!raw || raw === '0') {
-            const numbered = document.querySelector(
-              `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
-            );
             const altRaw = readInputValue(numbered);
-            // Prefer numbered value if rowCell missing/empty.
             if (!rowCell) raw = altRaw;
             else if (altRaw && altRaw !== '0') raw = altRaw;
+          }
+          if ((!raw || raw === '0') && subRowCell) {
+            const subRaw = readInputValue(subRowCell);
+            if (subRaw && subRaw !== '0') raw = subRaw;
           }
           return parseInt(raw || '0', 10);
         };
@@ -550,7 +811,8 @@ export class MainPage {
         // Capture path values ────────────────────────────────────────────
         const allCellValues: Array<[number, number]> = [];
         for (const unitId of unitsToExpand) {
-          allCellValues.push([unitId, getCellValueDom(unitId)]);
+          const v = getCellValueDom(unitId);
+          if (v !== null) allCellValues.push([unitId, v]);
         }
 
         // For each parent, find visible numbered children + their values.
@@ -582,7 +844,8 @@ export class MainPage {
             children.push(childUnitId);
             if (!seenChildren.has(childUnitId)) {
               seenChildren.add(childUnitId);
-              allCellValues.push([childUnitId, getCellValueDom(childUnitId)]);
+              const cv = getCellValueDom(childUnitId);
+              if (cv !== null) allCellValues.push([childUnitId, cv]);
             }
           }
           hierarchy.push([parentUnitId, children]);

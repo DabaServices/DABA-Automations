@@ -10,6 +10,23 @@ import { BACKEND_URL } from '../../playwright.config';
  */
 
 const API_BASE_URL = BACKEND_URL;
+const DEFAULT_USER = 'S9107544';
+
+/**
+ * Thrown when the backend returns a 4xx response. These are CLIENT errors
+ * (e.g. "screen unit is locked", "missing field") and will NEVER succeed
+ * on retry — callers should surface them immediately instead of looping.
+ */
+export class ClientError extends Error {
+  status: number;
+  body: unknown;
+  constructor(message: string, status: number, body: unknown) {
+    super(message);
+    this.name = 'ClientError';
+    this.status = status;
+    this.body = body;
+  }
+}
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -43,7 +60,7 @@ export async function reportUnits(
   requestingUnitId: number,
   screenDate?: string
 ): Promise<any> {
-  const url = `${API_BASE_URL}/reports/committees/report`;
+  const url = `${API_BASE_URL}/reports/committees/report?user=${encodeURIComponent(DEFAULT_USER)}`;
 
   const currentDate = screenDate || getTodayDate();
 
@@ -57,7 +74,8 @@ export async function reportUnits(
     'Content-Type': 'application/json',
     'authorization': 'Bearer',
     'unit': requestingUnitId.toString(),
-    'screendate': currentDate
+    'screendate': currentDate,
+    'user': DEFAULT_USER,
   };
 
   const action = isLaunching ? 'Launching' : 'Reporting (pre-lock)';
@@ -74,8 +92,16 @@ export async function reportUnits(
   }
 
   if (status !== 200 && status !== 201) {
-    const errorMsg = `Failed to report units [${unitsIds.join(', ')}]. Status: ${status}`;
+    const bodyPreview =
+      typeof responseBody === 'string'
+        ? responseBody.slice(0, 200)
+        : JSON.stringify(responseBody).slice(0, 200);
+    const errorMsg = `Failed to report units [${unitsIds.join(', ')}]. Status: ${status}. Body: ${bodyPreview}`;
     console.error(`[reportUnits] ${errorMsg}`);
+    // 4xx → permanent client error, do NOT retry
+    if (status >= 400 && status < 500) {
+      throw new ClientError(errorMsg, status, responseBody);
+    }
     throw new Error(errorMsg);
   }
 

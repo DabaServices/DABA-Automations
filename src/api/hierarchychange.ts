@@ -9,6 +9,7 @@ import { BACKEND_URL } from '../../playwright.config';
  */
 
 const API_BASE_URL = BACKEND_URL;
+const DEFAULT_USER = 'S9107544';
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -44,7 +45,7 @@ export async function updateUnitHierarchy(
   requestingUnitId?: number,
   screenDate?: string
 ): Promise<any> {
-  const url = `${API_BASE_URL}/units/hierarchy`;
+  const url = `${API_BASE_URL}/units/hierarchy?user=${encodeURIComponent(DEFAULT_USER)}`;
   
   // Use rootUnit as requestingUnitId if not provided
   const unitMakingRequest = requestingUnitId ?? rootUnit;
@@ -62,7 +63,8 @@ export async function updateUnitHierarchy(
     'Content-Type': 'application/json',
     'authorization': 'Bearer',
     'unit': unitMakingRequest.toString(),
-    'screendate': currentDate
+    'screendate': currentDate,
+    'user': DEFAULT_USER,
   };
 
   console.info(`[updateUnitHierarchy] Moving unit ${lowerUnit} from current parent to new parent ${upperUnit} as unit ${unitMakingRequest}`);

@@ -1,5 +1,6 @@
 import { APIRequestContext } from '@playwright/test';
 import { BACKEND_URL } from '../../playwright.config';
+import { ClientError } from './reportUnits';
 
 /**
  * Lock/Unlock Unit Status API
@@ -9,6 +10,7 @@ import { BACKEND_URL } from '../../playwright.config';
  */
 
 const API_BASE_URL = BACKEND_URL;
+const DEFAULT_USER = 'S9107544';
 
 /**
  * Get today's date in YYYY-MM-DD format
@@ -46,7 +48,7 @@ export async function lockUnitStatus(
   screenDate?: string,
   updateHierarchyOverride?: boolean
 ): Promise<any> {
-  const url = `${API_BASE_URL}/statuses`;
+  const url = `${API_BASE_URL}/statuses?user=${encodeURIComponent(DEFAULT_USER)}`;
   
   // Use today's date if not provided
   const currentDate = screenDate || getTodayDate();
@@ -66,13 +68,40 @@ export async function lockUnitStatus(
     'Content-Type': 'application/json',
     'authorization': 'Bearer',
     'unit': requestingUnitId.toString(),
-    'screendate': currentDate
+    'screendate': currentDate,
+    'user': DEFAULT_USER,
   };
 
   const statusText = lockStatus === 1 ? 'LOCK' : 'UNLOCK';
   const action = lockStatus === 1 ? 'Locking' : 'Unlocking';
 
-  const response = await request.post(url, { data: payload, headers });
+  // Retry transient network errors so a brief DNS / connection blip doesn't
+  // fail the whole test. We do NOT retry on a 4xx — that's a real client error.
+  const maxAttempts = 4;
+  let response: any;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      response = await request.post(url, { data: payload, headers, timeout: 20_000 });
+      break;
+    } catch (e) {
+      lastError = e;
+      const msg = String((e as Error)?.message ?? e);
+      const isTransient =
+        msg.includes('ENOTFOUND') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('socket hang up');
+      if (attempt === maxAttempts || !isTransient) throw e;
+      const wait = 1000 * attempt;
+      console.warn(
+        `[lockUnitStatus] ${action} attempt ${attempt}/${maxAttempts} network error (${msg.slice(0, 100)}); retrying in ${wait}ms…`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  if (!response) throw lastError;
 
   const status = response.status();
   let responseBody: any;
@@ -83,8 +112,15 @@ export async function lockUnitStatus(
   }
   
   if (status !== 201) {
-    const errorMsg = `Failed to ${statusText} units [${unitIds.join(', ')}]. Status: ${status}`;
+    const bodyPreview =
+      typeof responseBody === 'string'
+        ? responseBody.slice(0, 200)
+        : JSON.stringify(responseBody).slice(0, 200);
+    const errorMsg = `Failed to ${statusText} units [${unitIds.join(', ')}]. Status: ${status}. Body: ${bodyPreview}`;
     console.error(`[lockUnitStatus] ${errorMsg}`);
+    if (status >= 400 && status < 500) {
+      throw new ClientError(errorMsg, status, responseBody);
+    }
     throw new Error(errorMsg);
   }
   

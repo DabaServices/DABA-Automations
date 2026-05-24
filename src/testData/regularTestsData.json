@@ -1,19 +1,103 @@
 {
-  "randomDataCount": 2,
-  "hierarchicalAggregationTestData": [],
+  "hierarchicalAggregationTestData": [
+    {
+      "materialId": "000000006",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 710 / Gdud]",
+      "unitsToExpand": [
+        110,
+        710
+      ],
+      "numDataGenerated": 2
+    },
+    {
+      "materialId": "000000006",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 985 / Gdud]",
+      "unitsToExpand": [
+        25,
+        385,
+        985
+      ],
+      "numDataGenerated": 3
+    }
+  ],
   "makatValidationTestData": [
     {
       "index": 0,
-      "materialId": "000000027",
+      "materialId": "000000006",
       "description": "Material 1 - Basic Validation"
     }
   ],
-  "hierarchyExpansionTestData": [],
-  "leafCellClickabilityTestData": [],
-  "saveFunctionalityTestData": [],
+  "hierarchyExpansionTestData": [
+    {
+      "materialId": "000000006",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 685 / Gdud]",
+      "unitsToExpand": [
+        25,
+        385,
+        685
+      ],
+      "numDataGenerated": 3
+    },
+    {
+      "materialId": "000000006",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 895 / Gdud]",
+      "unitsToExpand": [
+        25,
+        295,
+        895
+      ],
+      "numDataGenerated": 3
+    }
+  ],
+  "leafCellClickabilityTestData": [
+    {
+      "materialId": "000000006",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 595 / Gdud]",
+      "unitsToExpand": [
+        25,
+        295,
+        595
+      ],
+      "numDataGenerated": 3
+    },
+    {
+      "materialId": "000000006",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 805 / Gdud]",
+      "unitsToExpand": [
+        25,
+        205,
+        805
+      ],
+      "numDataGenerated": 3
+    }
+  ],
+  "saveFunctionalityTestData": [
+    {
+      "materialId": "000000006",
+      "description": "Save Button Functionality Test [unit 505 / Gdud]",
+      "testValue": 5,
+      "unitsToExpand": [
+        25,
+        205,
+        505
+      ],
+      "numDataGenerated": 3
+    },
+    {
+      "materialId": "000000006",
+      "description": "Save Button Functionality Test [unit 983 / Gdud]",
+      "testValue": 5,
+      "unitsToExpand": [
+        23,
+        383,
+        983
+      ],
+      "numDataGenerated": 3
+    }
+  ],
   "commentFunctionalityTestData": [
     {
-      "materialId": "000000028",
+      "materialId": "000000006",
       "description": "Add Comment to Material Test",
       "commentText": "This is a test comment added via smoke test",
       "rowIndex": 0
@@ -21,7 +105,7 @@
   ],
   "deleteMakatTestData": [
     {
-      "materialId": "000000029",
+      "materialId": "000000006",
       "description": "Delete Material from Table Test"
     }
   ]

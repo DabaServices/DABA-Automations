@@ -19,15 +19,13 @@ export default defineConfig({
   // Match any .spec.ts or .test.ts files in any subdirectory
   testMatch: '**/*.spec.ts', 
 
-  // Disable parallel execution to prevent page/browser closure issues between tests
-  fullyParallel: false,
-
-  // Run with only 1 worker (sequential execution)
-  workers: 1,
-
-  // Warm up the app once before the suite to eliminate cold-start flakiness
-  // on the very first test (the Makat combobox sometimes takes >30s to mount).
-  globalSetup: require.resolve('./global-setup'),
+  // Parallel execution is safe when tests share NO top-level unit. Each spec
+  // groups its data into `describe.serial` clusters keyed by disjoint top
+  // units (see src/fixtures/parallelGroups.ts), so different clusters can
+  // safely run in parallel across workers without lock / move / aggregation
+  // contention. Tune workers down to 1 if you need fully sequential debug.
+  fullyParallel: true,
+  workers: process.env.CI ? 2 : 4,
 
   // Allow one retry to absorb transient UI hiccups (component remounts after
   // data fetches, network idle bouncing, etc.). CI gets a second retry.
@@ -47,7 +45,11 @@ export default defineConfig({
     headless: true,
 
     launchOptions: {
-      slowMo: 200,  // Increased from 1000ms to 1500ms for better headless rendering
+      // Slow-mo delay between actions (ms). Override via SLOW_MO env var.
+      // Default 0 — no artificial delay. Pagination, network and React
+      // render time alone provide plenty of "observation latency" in
+      // headed mode. Set SLOW_MO=50 if you really want a slight pause.
+      slowMo: Number(process.env.SLOW_MO ?? 200),
     },
     
     // Add longer page load timeout for network requests

@@ -2,6 +2,7 @@ import { APIRequestContext } from '@playwright/test';
 import { lockUnitStatus } from './lockunitstatus';
 import { reportUnits } from './reportUnits';
 import { BACKEND_URL } from '../../playwright.config';
+import { fetchHierarchyUnits } from './dynamicHierarchyDiscovery';
 
 /**
  * apiHelpers - Reusable helpers for API-related test operations
@@ -62,49 +63,62 @@ export const unlockHierarchyPath = async (
 const PIKUDS_API_URL = `${BACKEND_URL}/units/pikuds`;
 
 /**
- * Fetch all top-level unit IDs (pikuds) from the API.
- * Throws if the API call fails — no hardcoded fallback.
+ * Fetch all top-level unit IDs (children of Matkal, level 1) from the LIVE
+ * backend hierarchy.
+ *
+ * Why this matters: `/reports/committees/report` (called by
+ * `lockCompleteHierarchy`) requires the EXACT current set of top-level
+ * units in `lowerUnitsIds`. If we send a stale / hardcoded list the
+ * backend rejects with HTTP 502 + body
+ *     "ההיררכיה תחתיך השתנתה, יש לרענן את המסך"
+ * ("the hierarchy below you has changed — please refresh").
+ *
+ * Previous implementations relied on either `/units/pikuds` (often
+ * unavailable on the automations backend) or a hardcoded `[2..10]` list
+ * which goes stale as soon as any HC test reparents a unit to Matkal.
+ * We now derive the list from `/units/hierarchy`, which is the same
+ * endpoint the data-builder uses, so the two are always in sync.
+ *
+ * Result is cached per APIRequestContext for 30 s to avoid hammering the
+ * hierarchy endpoint on every lock call in a serial test cluster.
  */
+const TOP_UNITS_CACHE = new WeakMap<APIRequestContext, { at: number; ids: number[] }>();
+const TOP_UNITS_TTL_MS = 30_000;
+
 export const fetchAllTopLevelUnits = async (
-  _request: APIRequestContext
+  request: APIRequestContext
 ): Promise<number[]> => {
-  // TEMPORARY: connected to the regular backend (not the automations backend),
-  // so the /units/pikuds endpoint is unavailable. Returning a hardcoded list
-  // of top-level units instead. Restore the API call below when switched back.
-  const hardcodedUnits = [2, 3, 4, 5, 6, 7, 8, 9, 10];
-  console.info(`[fetchAllTopLevelUnits] Using hardcoded top-level units: [${hardcodedUnits.join(', ')}]`);
-  return hardcodedUnits;
-
-  /* ----- Original API-based implementation (re-enable when on automations BE) -----
-  const response = await _request.fetch(PIKUDS_API_URL, {
-    method: 'GET',
-    headers: {
-      'screendate': new Date().toISOString().split('T')[0],
-      'user': 'S9107544',
-    },
-  });
-  const responseBody = await response.text();
-  console.info(`[fetchAllTopLevelUnits] API response status: ${response.status()}, body: ${responseBody}`);
-
-  if (!response.ok()) {
-    throw new Error(`[fetchAllTopLevelUnits] API returned status ${response.status()}`);
+  const cached = TOP_UNITS_CACHE.get(request);
+  if (cached && Date.now() - cached.at < TOP_UNITS_TTL_MS) {
+    return cached.ids;
   }
 
-  const data = JSON.parse(responseBody);
-  // Handle both array and wrapped responses (e.g. { units: [...] } or { data: [...] })
-  const arr = Array.isArray(data) ? data : (data.units ?? data.data ?? data.results ?? []);
-  const unitIds: number[] = arr.map((u: any) => {
-    if (typeof u === 'number') return u;
-    return Number(u.id ?? u.unitId ?? u.unit_id ?? u.unitNumber ?? u.unit_number ?? u);
-  }).filter((id: number) => !isNaN(id) && id > 0);
+  let unitIds: number[];
+  try {
+    const units = await fetchHierarchyUnits(request);
+    unitIds = [
+      ...new Set(
+        units
+          .filter((u) => (u.parent as { id?: number } | undefined)?.id === 1 && u.id !== 1)
+          .map((u) => u.id),
+      ),
+    ].sort((a, b) => a - b);
 
-  if (unitIds.length === 0) {
-    throw new Error(`[fetchAllTopLevelUnits] API returned no valid unit IDs`);
+    if (unitIds.length === 0) {
+      throw new Error(
+        `[fetchAllTopLevelUnits] Live hierarchy returned 0 top-level units (children of Matkal=1).`,
+      );
+    }
+    console.info(
+      `[fetchAllTopLevelUnits] Live top-level units (${unitIds.length}): [${unitIds.join(', ')}]`,
+    );
+  } catch (error) {
+    console.error(`[fetchAllTopLevelUnits] Live fetch failed: ${error}`);
+    throw error;
   }
 
-  console.info(`[fetchAllTopLevelUnits] Fetched ${unitIds.length} top-level units from API: [${unitIds.join(', ')}]`);
+  TOP_UNITS_CACHE.set(request, { at: Date.now(), ids: unitIds });
   return unitIds;
-  ----- */
 };
 
 export const lockCompleteHierarchy = async (
@@ -118,9 +132,13 @@ export const lockCompleteHierarchy = async (
 
   console.info(`[lockCompleteHierarchy] Locking units: [${effectiveUnits.join(', ')}]${isLockAll ? ' (all top-level units)' : ''}`);
 
+  // Single fetch of top-level units — reuse for both report + (optional) lock-all path.
+  // The 30s WeakMap cache in fetchAllTopLevelUnits means subsequent callers
+  // in the same worker get it for free.
+  const allTopLevelUnits = await fetchAllTopLevelUnits(request);
+
   try {
     // Call report API before locking (isLaunching = false)
-    const allTopLevelUnits = await fetchAllTopLevelUnits(request);
     await reportUnits(request, effectiveUnits, allTopLevelUnits, false, rootFather);
 
     // When locking all top units, skip updateHierarchy to avoid server hanging on recalculation
@@ -129,25 +147,6 @@ export const lockCompleteHierarchy = async (
   } catch (error) {
     console.error(`[lockCompleteHierarchy] Failed to lock units [${effectiveUnits.join(', ')}]: ${error}`);
     throw error;
-  }
-
-  // After locking, call GET /units/hierarchy to trigger a full hierarchy
-  // refresh on the backend (mirrors what the UI does after confirming the lock).
-  // Without this call, aggregation values for old parents may remain stale.
-  try {
-    const date = new Date().toISOString().split('T')[0];
-    await request.get(`${BACKEND_URL}/units/hierarchy?user=S9107544`, {
-      headers: {
-        'Content-Type': 'application/json',
-        authorization: 'Bearer',
-        unit: rootFather.toString(),
-        screendate: date,
-        user: 'S9107544',
-      },
-    });
-    console.info(`[lockCompleteHierarchy] Hierarchy refresh triggered via GET /units/hierarchy`);
-  } catch (error) {
-    console.warn(`[lockCompleteHierarchy] Hierarchy refresh call failed (non-critical): ${error}`);
   }
 
   console.info(`[lockCompleteHierarchy] Completed locking all ${effectiveUnits.length} units`);
@@ -231,4 +230,98 @@ export const unlockCompleteHierarchy = async (
   }
 
   console.info(`[unlockCompleteHierarchy] Completed – unlocked ${unlockOrder.length} unit(s)`);
+};
+
+/**
+ * waitForConsistentRead — handles the backend's "stale read" caveat (Q3).
+ *
+ * The backend runs reads outside any transaction under READ COMMITTED, so a
+ * read fired immediately after a successful write may still observe the
+ * pre-commit snapshot for a brief window (no in-flight half-state, just lag).
+ *
+ * Polls a read function until `predicate(value) === true`, or the timeout
+ * expires. Use right after any mutating API call (move / save / lock-toggle)
+ * when the next assertion depends on the new value being visible.
+ *
+ * Example — after moving a unit, wait for the new parent's children list to
+ * include it before asserting:
+ *
+ *   await reparentUnit(request, { unitId: 104, newParent: 3 });
+ *   const children = await waitForConsistentRead(
+ *     () => getChildren(request, 3),
+ *     (kids) => kids.includes(104),
+ *     { label: 'parent 3 children include 104' }
+ *   );
+ *
+ * @param read       async function that performs the read
+ * @param predicate  returns true when the read result reflects the write
+ * @param opts.timeoutMs   total time budget (default 5000)
+ * @param opts.intervalMs  poll spacing (default 100)
+ * @param opts.label       human-readable description for error / log
+ *
+ * @returns The first read value that satisfies `predicate`.
+ * @throws  Error after `timeoutMs` if predicate never returned true.
+ */
+export const waitForConsistentRead = async <T>(
+  read: () => Promise<T>,
+  predicate: (value: T) => boolean,
+  opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {}
+): Promise<T> => {
+  const timeoutMs = opts.timeoutMs ?? 5000;
+  const intervalMs = opts.intervalMs ?? 100;
+  const label = opts.label ?? 'consistent read';
+  const deadline = Date.now() + timeoutMs;
+  let lastValue: T | undefined;
+  let attempts = 0;
+
+  while (Date.now() < deadline) {
+    attempts += 1;
+    try {
+      lastValue = await read();
+      if (predicate(lastValue)) {
+        if (attempts > 1) {
+          console.info(
+            `[waitForConsistentRead] "${label}" became consistent after ${attempts} attempts (~${attempts * intervalMs}ms).`
+          );
+        }
+        return lastValue;
+      }
+    } catch (err) {
+      console.warn(`[waitForConsistentRead] "${label}" attempt ${attempts} threw: ${err}`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+
+  throw new Error(
+    `[waitForConsistentRead] "${label}" did not become consistent within ${timeoutMs}ms ` +
+      `(${attempts} attempts). Last value: ${JSON.stringify(lastValue)}`
+  );
+};
+
+/**
+ * waitForUnitParent — convenience wrapper around `waitForConsistentRead`
+ * for the most common case: confirming a reparent has propagated to reads.
+ *
+ * Polls the live hierarchy until `unitId` reports `expectedParentId` as its
+ * parent. Use right after a move-unit API call.
+ *
+ *   await reparentUnit(request, { unitId: 104, newParent: 3 });
+ *   await waitForUnitParent(request, 104, 3);
+ */
+export const waitForUnitParent = async (
+  request: APIRequestContext,
+  unitId: number,
+  expectedParentId: number,
+  opts: { timeoutMs?: number; intervalMs?: number } = {}
+): Promise<void> => {
+  // Local import to avoid a circular dependency at module load time.
+  const { fetchHierarchyUnits } = await import('./dynamicHierarchyDiscovery');
+  await waitForConsistentRead(
+    async () => {
+      const units = await fetchHierarchyUnits(request);
+      return units.find((u) => u.id === unitId);
+    },
+    (unit) => (unit?.parent as { id: number } | null | undefined)?.id === expectedParentId,
+    { ...opts, label: `unit ${unitId} parent === ${expectedParentId}` }
+  );
 };

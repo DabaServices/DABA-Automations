@@ -30,17 +30,16 @@
  * reservation set, so the two files stay disjoint even when generated
  * separately.
  *
- * MATERIAL ID UNIQUENESS
- * ──────────────────────
- * Every generated entry gets a unique `materialId`, allocated from a global
- * counter starting at the template's base materialId. This prevents two
- * tests from racing on the same makat row (comments, save values, etc.).
+ * MATERIAL ID
+ * ───────────
+ * For now, every generated entry gets the same default `materialId`
+ * ("000000006") in BOTH the REGULAR and HIERARCHY_CHANGE outputs.
+ * Future work: add real per-entry materialId allocation logic.
  *
  * Run:
  *   npm run build:data              # both modes
  *   npm run build:data:regular      # REGULAR only
  *   npm run build:data:hierarchy    # HIERARCHY_CHANGE only
- *   npm run build:data:refresh      # bypass hierarchy cache
  */
 
 import * as fs from 'fs';
@@ -93,73 +92,24 @@ const HC_SLOT_PATTERN: SlotSpec[] = [
   { unitLevel: 4, kind: 'INSIDE' },
 ];
 
-// ─── Hierarchy cache (1h TTL) ───────────────────────────────────────────────
-const CACHE_FILE = path.resolve(__dirname, '../.cache/hierarchy.json');
-const CACHE_TTL_MS = 60 * 60 * 1000;
-
-function shouldRefreshCache(): boolean {
-  return (
-    process.env.DATA_BUILDER_REFRESH === '1' ||
-    process.argv.includes('--refresh')
-  );
-}
-
-function readCachedUnits(): HierarchyUnit[] | null {
-  try {
-    if (!fs.existsSync(CACHE_FILE)) return null;
-    const stat = fs.statSync(CACHE_FILE);
-    if (Date.now() - stat.mtimeMs > CACHE_TTL_MS) return null;
-    const parsed = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8')) as {
-      units?: HierarchyUnit[];
-    };
-    return Array.isArray(parsed.units) ? parsed.units : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeCachedUnits(units: HierarchyUnit[]): void {
-  try {
-    fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
-    fs.writeFileSync(
-      CACHE_FILE,
-      JSON.stringify({ fetchedAt: new Date().toISOString(), units }, null, 2),
-      'utf-8'
-    );
-  } catch (err) {
-    console.warn('[data-builder] Cache write failed:', err);
-  }
-}
+// ─── Live hierarchy fetch ───────────────────────────────────────────────────
+// The DB changes frequently, so we always fetch the live tree from the
+// backend — no on-disk cache.
 
 async function loadLiveTree(): Promise<Map<number, HierarchyUnit>> {
-  let units: HierarchyUnit[] | null = null;
-
-  if (!shouldRefreshCache()) {
-    units = readCachedUnits();
-    if (units) {
-      console.log(
-        `[data-builder] Using cached hierarchy (${units.length} units).`
-      );
-    }
-  } else {
-    console.log('[data-builder] Cache bypass requested → fetching fresh.');
-  }
-
-  if (!units) {
-    console.log('[data-builder] Fetching live hierarchy from backend...');
-    const ctx = await playwrightRequest.newContext();
-    try {
-      units = await Promise.race<HierarchyUnit[]>([
-        fetchHierarchyUnits(ctx),
-        new Promise<HierarchyUnit[]>((_, reject) =>
-          setTimeout(() => reject(new Error('Hierarchy fetch timed out (15s)')), 15000)
-        ),
-      ]);
-      writeCachedUnits(units);
-      console.log(`[data-builder] Fetched & cached ${units.length} units.`);
-    } finally {
-      await ctx.dispose();
-    }
+  console.log('[data-builder] Fetching live hierarchy from backend...');
+  const ctx = await playwrightRequest.newContext();
+  let units: HierarchyUnit[];
+  try {
+    units = await Promise.race<HierarchyUnit[]>([
+      fetchHierarchyUnits(ctx),
+      new Promise<HierarchyUnit[]>((_, reject) =>
+        setTimeout(() => reject(new Error('Hierarchy fetch timed out (15s)')), 15000)
+      ),
+    ]);
+    console.log(`[data-builder] Fetched ${units.length} units.`);
+  } finally {
+    await ctx.dispose();
   }
 
   const byId = new Map<number, HierarchyUnit>();
@@ -228,10 +178,6 @@ function isAncestor(ancestorId: number, unitId: number, idx: TreeIndex): boolean
 class Reservations {
   /** Every unit ID claimed by any generated/seeded entry, in any role. */
   claimed = new Set<number>();
-  /** R2: parents already used as `newParentUnit` in some HC entry. */
-  usedNewParents = new Set<number>();
-  /** R2: parents already used as `oldParentUnit` in some HC entry. */
-  usedOldParents = new Set<number>();
 
   /** Returns true if proposed claim has zero overlap with current state. */
   isDisjoint(proposed: Iterable<number>): boolean {
@@ -246,79 +192,101 @@ class Reservations {
 }
 
 /**
- * Claim model — STRICT but minimal (parallel-safe, slot-friendly).
+ * Claim model — minimal, parallel-safe.
  *
- * Goal: REGULAR and HIERARCHY_CHANGE tests can run simultaneously across
- * multiple Playwright workers without ANY two tests racing on the same
- * mutated state.
+ * Backend concurrency contract (verified against backend code):
+ *   • Two reparents into the SAME newParent:    SAFE (per-child rows).
+ *   • Two reparents away from the SAME oldParent: SAFE (per-child rows).
+ *   • Reads of aggregates during a move:         SAFE (READ COMMITTED;
+ *                                                snapshot, may be stale).
+ *   • Two reparents of the SAME unit:           NOT SAFE (no row-lock,
+ *                                                duplicate-open relations).
  *
- * Aggregations propagate UP the parent chain. A move from `oldParent` to
- * `newParent` only changes aggregated totals on ancestors that sit BELOW
- * the lowest common ancestor (LCA) of old & new — anything at or above the
- * LCA sees the same subtree-sum before and after the move (the unit just
- * relocates within the LCA's subtree). So we only need to claim:
+ * Therefore the only data-level contention we must prevent is:
+ *   (a) Two HC entries moving the SAME unit.
+ *   (b) An HC entry moving a unit that a REGULAR entry is also exercising
+ *       (otherwise the unit may have moved out from under the REGULAR test
+ *       between data-build time and test-run time).
  *
- *   HC entry:
- *     {unitToMove} ∪ descendants(unitToMove)              // moved subtree
- *     ∪ ancestors-from-oldParent-up-to-but-excluding-LCA  // change on remove
- *     ∪ ancestors-from-newParent-up-to-but-excluding-LCA  // change on add
- *     ∪ {newParent, oldParent}                            // child-list races
+ * Per HC entry — claim:
+ *     {unitToMove}                       // can't be reused as moved unit
  *
- *   REGULAR entry (read-only on aggregations of the gdud's chain):
- *     {gdud} ∪ ancestors(gdud) excluding ROOT
+ * Per REGULAR entry — claim:
+ *     {gdud}                             // can't be moved by HC, not picked twice
  *
- * R2 side-sets enforce that no two HC entries share an oldParent or a
- * newParent — closes child-list races.
- *
- * ROOT (Matkal) is exempt from chain claims because every test trivially
- * shares it; aggregating to root isn't part of the test surface.
+ * Ancestor / descendant / parent reservation is intentionally OMITTED — the
+ * backend's READ COMMITTED isolation makes those reads safe, and per-child
+ * row writes make per-parent contention safe.
  */
-function regularClaim(gdudId: number, idx: TreeIndex): Set<number> {
-  const set = new Set<number>([gdudId]);
-  for (const a of pathToRoot(gdudId, idx)) set.add(a);
-  set.delete(ROOT_UNIT_ID);
-  return set;
+/**
+ * Claim model — path-aware.
+ *
+ * The cross-entry hazard is: once entry A moves unit X from its current
+ * parent to somewhere else, any LATER entry B that has X anywhere on its
+ * `unitsToExpand` / `newHierarchy` will fail to find X in its expected
+ * location at run time. So we need two disjoint sets, tracked separately
+ * from the generic `Reservations.claimed`:
+ *
+ *   • movedUnits — every unit that some HC entry will move.
+ *   • pathUnits  — every unit appearing in some entry's persisted paths
+ *                  (unitsToExpand / newHierarchy) including the unitToMove
+ *                  at its leaf positions.
+ *
+ * Conflict rules (enforced in pickChangeMove / pickNextGdud):
+ *   • candidate `unitToMove` must NOT be in `pathUnits`
+ *     (otherwise some other test will look for it where it used to be).
+ *   • candidate's `unitsToExpand` ∪ `newHierarchy` must NOT intersect
+ *     `movedUnits` (otherwise some prior test moved a unit we rely on).
+ *
+ * The generic `Reservations.claimed` set is kept for back-compat but is
+ * intentionally not used as a hard gate beyond the unitToMove itself.
+ */
+
+class PathReservations {
+  /** Units that some HC entry will move (cannot appear in any other path). */
+  movedUnits = new Set<number>();
+  /** Units appearing in some entry's persisted paths (cannot be moved later). */
+  pathUnits = new Set<number>();
+
+  conflictsWithChange(unitToMove: number, paths: number[][]): boolean {
+    if (this.pathUnits.has(unitToMove)) return true;
+    for (const path of paths) {
+      for (const u of path) {
+        if (this.movedUnits.has(u) && u !== unitToMove) return true;
+      }
+    }
+    return false;
+  }
+
+  conflictsWithRegular(paths: number[][]): boolean {
+    for (const path of paths) {
+      for (const u of path) {
+        if (this.movedUnits.has(u)) return true;
+      }
+    }
+    return false;
+  }
+
+  commitChange(unitToMove: number, paths: number[][]): void {
+    this.movedUnits.add(unitToMove);
+    for (const path of paths) for (const u of path) this.pathUnits.add(u);
+  }
+
+  commitRegular(paths: number[][]): void {
+    for (const path of paths) for (const u of path) this.pathUnits.add(u);
+  }
 }
 
-/** Lowest common ancestor of two unit IDs (returns ROOT_UNIT_ID if disjoint). */
-function lca(a: number, b: number, idx: TreeIndex): number {
-  const aChain = new Set(pathToRoot(a, idx));
-  const bChain = pathToRoot(b, idx);
-  for (let i = bChain.length - 1; i >= 0; i--) {
-    if (aChain.has(bChain[i])) return bChain[i];
-  }
-  return ROOT_UNIT_ID;
+function regularClaim(gdudId: number, _idx: TreeIndex): Set<number> {
+  return new Set<number>([gdudId]);
 }
 
 function changeClaim(
   unitToMove: number,
-  newParent: number,
-  idx: TreeIndex
+  _newParent: number,
+  _idx: TreeIndex
 ): Set<number> {
-  const set = new Set<number>([unitToMove, newParent]);
-  for (const d of descendantsOf(unitToMove, idx)) set.add(d);
-
-  // Ancestors whose aggregated subtree-sum actually changes during this move
-  // are exactly those strictly below the LCA of (oldParent, newParent).
-  const oldParent =
-    (idx.byId.get(unitToMove)!.parent as { id: number } | null | undefined)?.id ??
-    ROOT_UNIT_ID;
-  const sharedRoot = lca(oldParent, newParent, idx);
-
-  // Walk old chain: unit's parent up the tree, stop when we hit sharedRoot.
-  for (const a of pathToRoot(unitToMove, idx)) {
-    if (a === unitToMove) continue;
-    if (a === sharedRoot) break;
-    set.add(a);
-  }
-  // Walk new chain: newParent up the tree, stop when we hit sharedRoot.
-  for (const a of pathToRoot(newParent, idx)) {
-    if (a === sharedRoot) break;
-    set.add(a);
-  }
-
-  set.delete(ROOT_UNIT_ID);
-  return set;
+  return new Set<number>([unitToMove]);
 }
 
 // ─── Cross-file seeding ─────────────────────────────────────────────────────
@@ -331,6 +299,7 @@ function changeClaim(
  */
 function seedReservationsFromOutputs(
   reservations: Reservations,
+  paths: PathReservations,
   idx: TreeIndex
 ): void {
   for (const file of [REGULAR_OUTPUT, CHANGE_OUTPUT]) {
@@ -344,50 +313,55 @@ function seedReservationsFromOutputs(
     for (const v of Object.values(data)) {
       if (!Array.isArray(v)) continue;
       for (const e of v as Record<string, unknown>[]) {
-        // Hierarchy-change shape
+        const expand = Array.isArray(e.unitsToExpand)
+          ? (e.unitsToExpand as number[]).filter((u) => typeof u === 'number')
+          : [];
+        const newH = Array.isArray(e.newHierarchy)
+          ? (e.newHierarchy as number[]).filter((u) => typeof u === 'number')
+          : [];
+
         if (
           typeof e.unitToMove === 'number' &&
           typeof e.newParentUnit === 'number'
         ) {
+          // Hierarchy-change entry
           if (idx.byId.has(e.unitToMove) && idx.byId.has(e.newParentUnit)) {
             reservations.commit(changeClaim(e.unitToMove, e.newParentUnit, idx));
-            reservations.usedNewParents.add(e.newParentUnit);
-            if (typeof e.oldParentUnit === 'number') {
-              reservations.usedOldParents.add(e.oldParentUnit);
-            }
           }
+          paths.commitChange(e.unitToMove, [expand, newH]);
+          continue;
         }
-        // Regular gdud shape: take last unit of unitsToExpand if it exists.
-        if (Array.isArray(e.unitsToExpand) && e.unitsToExpand.length > 0) {
-          const leaf = e.unitsToExpand[e.unitsToExpand.length - 1] as number;
+
+        if (expand.length > 0) {
+          // Regular entry
+          const leaf = expand[expand.length - 1];
           if (typeof leaf === 'number' && idx.byId.has(leaf)) {
             reservations.commit(regularClaim(leaf, idx));
           }
+          paths.commitRegular([expand]);
         }
       }
     }
   }
 }
 
-// ─── Material ID sequence (global, unique per generated entry) ──────────────
+// ─── Material ID sequence ───────────────────────────────────────────────────
+// NOTE: For now every generated entry (REGULAR and HIERARCHY_CHANGE) gets the
+// same default materialId ("000000006"). In the future, replace `next()` with
+// real allocation logic (e.g. discover unique makats per test).
+
+const DEFAULT_MATERIAL_ID = '000000006';
 
 class MaterialIdSeq {
-  private counter: number;
-  private width: number;
+  private value: string;
 
-  constructor(base: string) {
-    this.counter = parseInt(base, 10);
-    this.width = base.length;
-    if (Number.isNaN(this.counter)) {
-      this.counter = 6;
-      this.width = 9;
-    }
+  constructor(_base: string) {
+    // Ignore the base for now — always emit the fixed default.
+    this.value = DEFAULT_MATERIAL_ID;
   }
 
   next(): string {
-    const id = String(this.counter).padStart(this.width, '0');
-    this.counter += 1;
-    return id;
+    return this.value;
   }
 }
 
@@ -428,6 +402,7 @@ function pickGdudLevel(idx: TreeIndex): number {
 function pickNextGdud(
   idx: TreeIndex,
   reservations: Reservations,
+  paths: PathReservations,
   alreadyPicked: Set<number>,
   gdudLevel: number
 ): number | null {
@@ -435,11 +410,13 @@ function pickNextGdud(
     if (u.level !== gdudLevel) continue;
     if (alreadyPicked.has(u.id)) continue;
     const claim = regularClaim(u.id, idx);
-    if (reservations.isDisjoint(claim)) {
-      reservations.commit(claim);
-      alreadyPicked.add(u.id);
-      return u.id;
-    }
+    if (!reservations.isDisjoint(claim)) continue;
+    const expandPath = topDownPath(u.id, idx);
+    if (paths.conflictsWithRegular([expandPath])) continue;
+    reservations.commit(claim);
+    paths.commitRegular([expandPath]);
+    alreadyPicked.add(u.id);
+    return u.id;
   }
   return null;
 }
@@ -466,6 +443,7 @@ function buildRegularEntry(
 function runRegular(
   idx: TreeIndex,
   reservations: Reservations,
+  paths: PathReservations,
   matSeq: MaterialIdSeq
 ): void {
   console.log('[data-builder] === REGULAR ===');
@@ -498,7 +476,7 @@ function runRegular(
 
     const generated: Record<string, unknown>[] = [];
     for (let i = 0; i < targetCount; i++) {
-      const g = pickNextGdud(idx, reservations, pickedGduds, gdudLevel);
+      const g = pickNextGdud(idx, reservations, paths, pickedGduds, gdudLevel);
       if (g == null) {
         console.warn(
           `[data-builder]   ${arrayKey} slot ${i + 1}/${targetCount}: no disjoint gdud available — skipping.`
@@ -537,6 +515,69 @@ interface ChangeMove {
 }
 
 /**
+ * Lightweight Union-Find used to track which units belong to which
+ * "parallel-test component" across all entries generated so far. The
+ * picker uses this to prefer moves that join FEWER existing components,
+ * which directly maximises the number of independent clusters that
+ * `groupByAllComponents` can later emit (= more parallel workers).
+ */
+class UF {
+  parent = new Map<number, number>();
+  size = new Map<number, number>();
+  ensure(x: number) {
+    if (!this.parent.has(x)) {
+      this.parent.set(x, x);
+      this.size.set(x, 1);
+    }
+  }
+  find(x: number): number {
+    this.ensure(x);
+    let r = x;
+    while (this.parent.get(r)! !== r) r = this.parent.get(r)!;
+    let cur = x;
+    while (this.parent.get(cur)! !== r) {
+      const nxt = this.parent.get(cur)!;
+      this.parent.set(cur, r);
+      cur = nxt;
+    }
+    return r;
+  }
+  union(a: number, b: number) {
+    const ra = this.find(a);
+    const rb = this.find(b);
+    if (ra === rb) return;
+    const sa = this.size.get(ra)!;
+    const sb = this.size.get(rb)!;
+    if (sa < sb) {
+      this.parent.set(ra, rb);
+      this.size.set(rb, sa + sb);
+    } else {
+      this.parent.set(rb, ra);
+      this.size.set(ra, sa + sb);
+    }
+  }
+  /** Distinct existing-component roots touched by `units`, plus their total size. */
+  inspect(units: Iterable<number>): { roots: Set<number>; totalSize: number } {
+    const roots = new Set<number>();
+    let totalSize = 0;
+    for (const u of units) {
+      if (!this.parent.has(u)) continue;
+      const r = this.find(u);
+      if (!roots.has(r)) {
+        roots.add(r);
+        totalSize += this.size.get(r)!;
+      }
+    }
+    return { roots, totalSize };
+  }
+  commit(units: number[]) {
+    if (units.length === 0) return;
+    units.forEach((u) => this.ensure(u));
+    for (let i = 1; i < units.length; i++) this.union(units[0], units[i]);
+  }
+}
+
+/**
  * Find a (unitToMove, newParent) pair satisfying:
  *   • unitToMove.level === slot.unitLevel
  *   • newParent.level < unitToMove.level
@@ -545,12 +586,36 @@ interface ChangeMove {
  *   • INSIDE  → newParent is on unitToMove's current ancestor chain
  *     OUTSIDE → newParent is NOT on unitToMove's current ancestor chain
  *   • the resulting claim is disjoint from existing reservations.
+ *
+ * Scoring (lower = better):
+ *   1. mergedComponents — how many existing parallel-clusters this entry
+ *      would fuse together. 0 means a brand-new cluster (best); >1 means
+ *      this entry bridges previously-independent components (worst).
+ *   2. mergedSize       — total size of components being fused (tiebreak).
+ *   3. topUsage         — spread top Pikuds evenly (legacy heuristic).
+ *   4. matkalPenalty    — discourage Matkal as destination unless needed.
  */
 function pickChangeMove(
   slot: SlotSpec,
   idx: TreeIndex,
-  reservations: Reservations
+  reservations: Reservations,
+  paths: PathReservations,
+  topUsage: Map<number, number>,
+  uf: UF
 ): ChangeMove | null {
+  type Candidate = {
+    unit: HierarchyUnit;
+    cand: HierarchyUnit;
+    oldParent: number;
+    oldPath: number[];
+    newPath: number[];
+    mergedComponents: number;
+    mergedSize: number;
+    score: number;
+  };
+
+  const candidates: Candidate[] = [];
+
   for (const unit of idx.byId.values()) {
     if (unit.level !== slot.unitLevel) continue;
     const oldParent = (unit.parent as { id: number } | null | undefined)?.id;
@@ -569,30 +634,76 @@ function pickChangeMove(
       if (slot.kind === 'INSIDE' && !onAncestorChain) continue;
       if (slot.kind === 'OUTSIDE' && onAncestorChain) continue;
 
-      // R2: each (oldParent, newParent) is used at most once across HC.
-      // Two reparents into / away from the same parent would race on that
-      // parent's child list and aggregated total.
-      if (reservations.usedOldParents.has(oldParent)) continue;
-      if (reservations.usedNewParents.has(cand.id)) continue;
-
-      // newParent must not be inside a subtree already claimed for moving.
+      // newParent must not be a unit that is itself being moved by another
+      // entry (would mean parenting under something in flux). Backend
+      // guarantees same-newParent and same-oldParent races are safe, so we
+      // do NOT block on those.
       if (reservations.claimed.has(cand.id)) continue;
 
       const claim = changeClaim(unit.id, cand.id, idx);
       if (!reservations.isDisjoint(claim)) continue;
 
-      reservations.commit(claim);
-      reservations.usedOldParents.add(oldParent);
-      reservations.usedNewParents.add(cand.id);
-      return {
-        unitToMove: unit.id,
+      // Path-disjointness: the moved unit can't already appear on someone
+      // else's path, and our two paths can't contain anyone already moved.
+      const oldPath = topDownPath(unit.id, idx);
+      const newParentPath =
+        cand.id === ROOT_UNIT_ID ? [] : topDownPath(cand.id, idx);
+      const newPath = [...newParentPath, unit.id];
+      if (paths.conflictsWithChange(unit.id, [oldPath, newPath])) continue;
+
+      // ── Score 1: how many existing parallel-clusters this entry would
+      // fuse. The aim is to keep clusters small and numerous.
+      const touched = new Set<number>([...oldPath, ...newPath]);
+      const { roots, totalSize } = uf.inspect(touched);
+
+      // ── Score 2: legacy top-Pikud spread (kept as a secondary signal).
+      const oldTop = oldPath[0];
+      const newTop = newPath[0];
+      const oldCount = topUsage.get(oldTop) ?? 0;
+      const newCount = topUsage.get(newTop) ?? 0;
+      const matkalPenalty = cand.id === ROOT_UNIT_ID ? 2 : 0;
+      const score = oldCount + newCount + matkalPenalty;
+
+      candidates.push({
+        unit,
+        cand,
         oldParent,
-        newParent: cand.id,
-        kind: slot.kind,
-      };
+        oldPath,
+        newPath,
+        mergedComponents: roots.size,
+        mergedSize: totalSize,
+        score,
+      });
     }
   }
-  return null;
+
+  if (candidates.length === 0) return null;
+
+  // Sort: fewest-merged-components first, then smallest-merged-size,
+  // then Pikud spread, then deterministic ids.
+  candidates.sort((a, b) => {
+    if (a.mergedComponents !== b.mergedComponents)
+      return a.mergedComponents - b.mergedComponents;
+    if (a.mergedSize !== b.mergedSize) return a.mergedSize - b.mergedSize;
+    if (a.score !== b.score) return a.score - b.score;
+    if (a.unit.id !== b.unit.id) return a.unit.id - b.unit.id;
+    return a.cand.id - b.cand.id;
+  });
+
+  const pick = candidates[0];
+
+  reservations.commit(changeClaim(pick.unit.id, pick.cand.id, idx));
+  paths.commitChange(pick.unit.id, [pick.oldPath, pick.newPath]);
+  topUsage.set(pick.oldPath[0], (topUsage.get(pick.oldPath[0]) ?? 0) + 1);
+  topUsage.set(pick.newPath[0], (topUsage.get(pick.newPath[0]) ?? 0) + 1);
+  uf.commit([...new Set<number>([...pick.oldPath, ...pick.newPath])]);
+
+  return {
+    unitToMove: pick.unit.id,
+    oldParent: pick.oldParent,
+    newParent: pick.cand.id,
+    kind: slot.kind,
+  };
 }
 
 function buildChangeEntry(
@@ -625,6 +736,7 @@ function buildChangeEntry(
 function runHierarchyChange(
   idx: TreeIndex,
   reservations: Reservations,
+  paths: PathReservations,
   matSeq: MaterialIdSeq
 ): void {
   console.log('[data-builder] === HIERARCHY_CHANGE ===');
@@ -633,6 +745,28 @@ function runHierarchyChange(
 
   let totalGenerated = 0;
   let totalSkipped = 0;
+
+  // Track how often each top-of-path Pikud has been used. The picker uses
+  // this to spread moves evenly across all Pikuds (instead of repeatedly
+  // funnelling through Pikud(2)/Pikud(3)/Matkal). Shared across all three
+  // HC arrays so the spreading is global.
+  const topUsage = new Map<number, number>();
+  for (const u of paths.pathUnits) {
+    // Heuristic seeding: any unit already on someone's path counts once.
+    topUsage.set(u, (topUsage.get(u) ?? 0) + 1);
+  }
+
+  // Component tracker: each generated entry's full path-union becomes a
+  // single connected component; the picker minimises cluster-fusion across
+  // entries. Seed from any pre-existing path units so re-runs respect
+  // prior structure.
+  const uf = new UF();
+  if (paths.pathUnits.size > 0) {
+    // We don't know which seed units belonged together, so be conservative
+    // and treat each as its own singleton component (best case: no fusion
+    // beyond what new entries cause).
+    for (const u of paths.pathUnits) uf.ensure(u);
+  }
 
   for (const [arrayKey, arrVal] of Object.entries(template)) {
     if (!Array.isArray(arrVal) || arrVal.length === 0) {
@@ -644,7 +778,7 @@ function runHierarchyChange(
 
     for (let i = 0; i < HC_SLOT_PATTERN.length; i++) {
       const slot = HC_SLOT_PATTERN[i];
-      const move = pickChangeMove(slot, idx, reservations);
+      const move = pickChangeMove(slot, idx, reservations, paths, topUsage, uf);
       if (!move) {
         console.warn(
           `[data-builder]   ${arrayKey} slot ${i + 1} (${LEVEL_LABEL[slot.unitLevel]} ${slot.kind}): no candidate — skipping.`
@@ -702,14 +836,16 @@ async function main(): Promise<void> {
   console.log(`[data-builder] Indexed ${byId.size} units.`);
 
   const reservations = new Reservations();
+  const paths = new PathReservations();
 
   // When generating only one mode, seed from the OTHER file's existing
   // entries so the two stay disjoint. When generating both, we start clean.
   if (mode === 'REGULAR' || mode === 'HIERARCHY_CHANGE') {
-    seedReservationsFromOutputs(reservations, idx);
-    if (reservations.claimed.size > 0) {
+    seedReservationsFromOutputs(reservations, paths, idx);
+    if (reservations.claimed.size > 0 || paths.movedUnits.size > 0) {
       console.log(
-        `[data-builder] Pre-seeded ${reservations.claimed.size} reserved units from existing output files.`
+        `[data-builder] Pre-seeded ${reservations.claimed.size} reserved units and ` +
+          `${paths.movedUnits.size} moved-units / ${paths.pathUnits.size} path-units from existing outputs.`
       );
     }
   }
@@ -718,17 +854,18 @@ async function main(): Promise<void> {
 
   switch (mode) {
     case 'REGULAR':
-      runRegular(idx, reservations, matSeq);
+      runRegular(idx, reservations, paths, matSeq);
       break;
     case 'HIERARCHY_CHANGE':
-      runHierarchyChange(idx, reservations, matSeq);
+      runHierarchyChange(idx, reservations, paths, matSeq);
       break;
     case '':
-      // HIERARCHY_CHANGE first — its slot constraints are tighter (each move
-      // claims a wider blast radius), so satisfy them while the reservation
-      // set is still small.
-      runHierarchyChange(idx, reservations, matSeq);
-      runRegular(idx, reservations, matSeq);
+      // REGULAR is cheap (8 entries × short chains) and entirely read-only,
+      // so let it grab a few small disjoint chains first. HC then fills
+      // around the reservations, packing the remaining 36 slots into the
+      // (still large) unclaimed portion of the tree.
+      runRegular(idx, reservations, paths, matSeq);
+      runHierarchyChange(idx, reservations, paths, matSeq);
       break;
     default:
       throw new Error(

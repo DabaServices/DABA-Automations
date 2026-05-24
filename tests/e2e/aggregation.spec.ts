@@ -1,4 +1,5 @@
 import { test, expect } from '../../src/fixtures';
+import { withPhase } from '../../src/fixtures/withPhase';
 import regularTestsData from '../../src/testData/regularTestsData.json';
 
 const hierarchicalAggregationTestData = regularTestsData.hierarchicalAggregationTestData;
@@ -42,32 +43,59 @@ hierarchicalAggregationTestData.forEach((testData) => {
     async ({ hierarchyPage }) => {
       const makatId = testData.materialId;
       const unitsToExpand = testData.unitsToExpand;
+      const ctx = { makatId, unitsToExpand };
 
       // STEP 1: Add the material to the table
-      await hierarchyPage.addMakatFromDropdown(makatId);
+      await withPhase('Add makat from dropdown', ctx, () =>
+        hierarchyPage.addMakatFromDropdown(makatId),
+      );
 
       // STEP 2: Expand ONLY the given hierarchy path - no more, no less
-      await hierarchyPage.expandHierarchyToLeaf(makatId, unitsToExpand);
+      await withPhase('Expand hierarchy to leaf', ctx, () =>
+        hierarchyPage.expandHierarchyToLeaf(makatId, unitsToExpand),
+      );
 
       // STEP 3: Set test values at leaf cells
-      const leafValues = await hierarchyPage.setLeafCellValues(makatId, unitsToExpand, 4);
+      await withPhase('Set leaf cell values', ctx, () =>
+        hierarchyPage.setLeafCellValues(makatId, unitsToExpand, 4),
+      );
 
       // STEP 4: Capture ALL visible cell values at each level (including all siblings)
-      const allVisibleValues = await hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, unitsToExpand);
+      const allVisibleValues = await withPhase(
+        'Capture all visible cell values',
+        ctx,
+        () =>
+          hierarchyPage.captureAllVisibleCellValuesAtEachLevel(
+            makatId,
+            unitsToExpand,
+          ),
+      );
 
       // STEP 5: Verify aggregation with all visible children using the captured values
-      console.log(`\n[AGGREGATION VERIFICATION] Verifying aggregation including all siblings...`);
-      const aggregationValid = await hierarchyPage.verifyAggregationWithAllVisibleCells(
-        makatId,
-        unitsToExpand,
-        allVisibleValues
+      console.log(
+        `\n[AGGREGATION VERIFICATION] Verifying aggregation including all siblings...`,
+      );
+      const aggregationValid = await withPhase(
+        'Verify aggregation rule',
+        ctx,
+        () =>
+          hierarchyPage.verifyAggregationWithAllVisibleCells(
+            makatId,
+            unitsToExpand,
+            allVisibleValues,
+          ),
       );
       if (aggregationValid) {
         console.log(`✓ AGGREGATION VERIFIED`);
       } else {
         console.log(`✗ AGGREGATION FAILED`);
       }
-      expect(aggregationValid).toBe(true);
+      expect(
+        aggregationValid,
+        `[ASSERTION: aggregation-invalid] Aggregation rule (parent = sum(children)) violated on hierarchy [${unitsToExpand.join(
+          ' → ',
+        )}] for material ${makatId}.`,
+      ).toBe(true);
     }
   );
 });
