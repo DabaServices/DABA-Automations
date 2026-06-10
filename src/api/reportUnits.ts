@@ -60,7 +60,8 @@ export async function reportUnits(
   requestingUnitId: number,
   screenDate?: string
 ): Promise<any> {
-  const url = `${API_BASE_URL}/reports/committees/report?user=${encodeURIComponent(DEFAULT_USER)}`;
+  // Auth/identity goes in headers (user, screendate, unit) — NOT in the URL.
+  const url = `${API_BASE_URL}/reports/committees/report`;
 
   const currentDate = screenDate || getTodayDate();
 
@@ -71,11 +72,9 @@ export async function reportUnits(
   };
 
   const headers = {
-    'Content-Type': 'application/json',
-    'authorization': 'Bearer',
-    'unit': requestingUnitId.toString(),
     'screendate': currentDate,
-    'user': DEFAULT_USER,
+    'username': DEFAULT_USER,
+    'unit': String(requestingUnitId),
   };
 
   const action = isLaunching ? 'Launching' : 'Reporting (pre-lock)';

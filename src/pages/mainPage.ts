@@ -250,6 +250,11 @@ export class MainPage {
     const isUnitOnVisiblePage = async (): Promise<boolean> =>
       (await header.count()) > 0;
 
+    // The loading overlay swallows carousel "next" clicks (they look like they
+    // landed but the page never swaps), making the carousel appear exhausted
+    // before the target unit is reached. Wait for it to clear up-front.
+    await this.waitForAmmoLoadingGone();
+
     if (await isUnitOnVisiblePage()) return true;
 
     // Forward pagination only — the carousel starts at the leftmost page
@@ -258,6 +263,9 @@ export class MainPage {
     // next arrow disappears (= end of the list).
     const nextBtn = this.carouselNextButton();
     for (let i = 0; i < maxClicks; i++) {
+      // Re-check before EACH click: a spinner can reappear between pages while
+      // the next carousel chunk loads. Clicking through it is a silent no-op.
+      await this.waitForAmmoLoadingGone();
       const arrowVisible = await nextBtn
         .first()
         .isVisible({ timeout: 200 })
@@ -301,6 +309,52 @@ export class MainPage {
       `[revealUnitInCarousel] Exhausted ${maxClicks} carousel clicks without revealing unit ${unitId}.`,
     );
     return await isUnitOnVisiblePage();
+  }
+
+  /**
+   * Returns true if the given TOP-level unit appears ANYWHERE in the carousel
+   * (on the current page OR any page reachable by paging "next"), independent
+   * of any material being added.
+   *
+   * Unlike {@link revealUnitInCarousel}, this does NOT require a materialId, so
+   * it is safe to call in `beforeEach` BEFORE any makat has been selected. It
+   * is the authoritative check for "did this top unit's lock get reflected on
+   * the carousel yet?" — the carousel only renders LOCKED top-level units, so a
+   * freshly-locked unit that is still missing here means the lock landed after
+   * the carousel's hierarchy fetch and a reload is needed to pick it up.
+   *
+   * Resets the carousel to the leftmost page first so accumulated pagination
+   * state from a previous step doesn't cause a false negative.
+   */
+  async isTopUnitOnCarousel(unitId: number, maxClicks = 40): Promise<boolean> {
+    const header = this.topUnitHeaderLabel(unitId);
+    await this.resetCarouselToLeftmost().catch(() => undefined);
+
+    if ((await header.count()) > 0) return true;
+
+    const nextBtn = this.carouselNextButton();
+    for (let i = 0; i < maxClicks; i++) {
+      const arrowVisible = await nextBtn
+        .first()
+        .isVisible({ timeout: 200 })
+        .catch(() => false);
+      if (!arrowVisible) break; // end of the carousel — unit is not present
+
+      await nextBtn
+        .first()
+        .click({ timeout: 5_000 })
+        .catch(() => undefined);
+      await this.page.waitForTimeout(150);
+
+      if ((await header.count()) > 0) {
+        // Leave the carousel back at the leftmost page so downstream
+        // expansion logic starts from a known position.
+        await this.resetCarouselToLeftmost().catch(() => undefined);
+        return true;
+      }
+    }
+    await this.resetCarouselToLeftmost().catch(() => undefined);
+    return false;
   }
 
   /**
@@ -412,14 +466,21 @@ export class MainPage {
   // ──────────────── Utility Methods ────────────────
 
   /**
-   * Wait for network requests to complete and page to be fully interactive.
+   * Wait for the document to be parsed and the app shell to be interactive.
+   *
+   * NOTE: We intentionally do NOT wait for `networkidle` here. The DABA
+   * frontend keeps long-poll / telemetry connections open, so `networkidle`
+   * can add 1–3 s of dead-wait per navigation while telling us nothing
+   * about whether the app is actually ready. Callers that need a stronger
+   * readiness signal (e.g. the test `beforeEach`) should call
+   * `waitForMakatComboboxReady`, which polls the DOM for the real
+   * "interactive" signal.
    */
   async waitForPageReady(): Promise<void> {
     try {
       await this.page.waitForLoadState('domcontentloaded');
-      await this.page.waitForLoadState('networkidle');
     } catch (error) {
-      console.warn(`[waitForPageReady] Some network waits timed out, continuing: ${error}`);
+      console.warn(`[waitForPageReady] domcontentloaded wait failed, continuing: ${error}`);
     }
   }
 
@@ -434,14 +495,62 @@ export class MainPage {
     }
   }
 
+  /**
+   * The full-screen loading overlay the app renders while it fetches /
+   * recomputes grid data (`data-testid="AmmoLoading"`, `aria-busy="true"`).
+   *
+   * While present it INTERCEPTS pointer events, so any hover/click attempted
+   * on a cell underneath it fails with Playwright's
+   * `<div … data-testid="AmmoLoading"> intercepts pointer events`. Scoping to
+   * `[aria-busy="true"]` means the locator stops matching the moment loading
+   * finishes (the app flips the attribute / removes the node), so a
+   * `state: 'hidden'` wait resolves for BOTH "overlay removed" and
+   * "overlay no longer busy".
+   */
+  protected loadingOverlay(): Locator {
+    return this.page.locator('[data-testid="AmmoLoading"][aria-busy="true"]');
+  }
+
+  /**
+   * Wait until the {@link loadingOverlay} is gone before interacting with the
+   * grid. This is the fix for the expansion races seen in the hierarchy-change
+   * tests:
+   *   • `AFTER=MISSING` — the overlay intercepted the hover on the new
+   *     parent's cell after a post-move reload, so it never expanded.
+   *   • silent carousel pagination — "next" clicks were swallowed by the
+   *     overlay, making the carousel look exhausted before the target unit
+   *     was reached.
+   *
+   * Safe to call anytime: returns immediately if no overlay is present, and
+   * NEVER throws — on timeout it logs and lets the caller proceed so a stuck
+   * spinner degrades gracefully instead of hard-failing the step.
+   */
+  async waitForAmmoLoadingGone(timeout = 15000): Promise<void> {
+    try {
+      const overlay = this.loadingOverlay();
+      if ((await overlay.count()) === 0) return;
+      await overlay.first().waitFor({ state: 'hidden', timeout });
+    } catch (err) {
+      console.warn(
+        `[waitForAmmoLoadingGone] Loading overlay still present after ${timeout}ms — proceeding anyway: ${String(
+          err,
+        ).slice(0, 120)}`,
+      );
+    }
+  }
+
   // ──────────────── Navigation ────────────────
 
   /**
-   * Navigate to the application root and wait for full initialisation.
+   * Navigate to the application root and wait for the document to be parsed.
+   *
+   * Returns as soon as `domcontentloaded` fires; it does NOT wait for
+   * subresources or `networkidle` (the SPA keeps long-poll connections
+   * open, which makes those waits unreliable). Callers that need stronger
+   * readiness should chain `waitForMakatComboboxReady` afterwards.
    */
   async goto(): Promise<void> {
-    await this.page.goto('/');
-    await this.waitForPageReady();
+    await this.page.goto('/', { waitUntil: 'domcontentloaded' });
   }
 
   /**
@@ -532,19 +641,15 @@ export class MainPage {
     console.info(`[waitForMakatComboboxReady] Waiting for makat combobox to be ready (${timeout}ms)...`);
     try {
       // The combobox can briefly disappear/remount while React rehydrates
-      // after the lock & hierarchy fetches finish. Use waitForSelector to
-      // poll the DOM until the element exists, then assert visibility.
+      // after the lock & hierarchy fetches finish. `waitForSelector` polls
+      // the DOM and returns once the element is visible — that's already
+      // a strong-enough signal for "rendered". A separate `toBeEnabled`
+      // assertion guarantees React has finished hydrating it.
       await this.page.waitForSelector('[role="combobox"]', {
         state: 'visible',
         timeout,
       });
-
-      await expect(this.makatCombobox).toBeVisible({ timeout: 10_000 });
       await expect(this.makatCombobox).toBeEnabled({ timeout: Math.min(10_000, timeout) });
-
-      // Let React finish any in-flight remount before consumers click.
-      await this.page.waitForTimeout(500);
-      await expect(this.makatCombobox).toBeVisible({ timeout: 5_000 });
 
       await this.makatCombobox.scrollIntoViewIfNeeded();
       console.info(`[waitForMakatComboboxReady] Makat combobox is ready`);
@@ -626,7 +731,6 @@ export class MainPage {
           if (attempt === maxRetries) throw error;
           console.warn(`[addMakatFromDropdown] Selection attempt ${attempt} failed, retrying...`);
           await this.goto();
-          await this.page.waitForLoadState('networkidle');
           await this.waitForMakatComboboxReady(30000);
         }
       }
@@ -735,6 +839,11 @@ export class MainPage {
     materialId: string,
     unitsToExpand: number[]
   ): Promise<Map<number, number>> {
+    // Settle any in-flight loading overlay first — capturing while the grid
+    // is still recomputing reads stale "0"s (or nothing) for cells that are
+    // about to render their real values.
+    await this.waitForAmmoLoadingGone();
+
     // If the first unit on the path is a top-level unit that's currently
     // off-screen in the paginated header carousel, scroll the carousel
     // until it appears — otherwise its row-cell is not in the DOM and

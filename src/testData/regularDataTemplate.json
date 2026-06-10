@@ -10,7 +10,8 @@
    {
      "index": 0,
      "materialId": "000000006",
-     "description": "Material 1 - Basic Validation"
+     "description": "Material 1 - Basic Validation",
+     "numDataObject": 1
    }
  ],
  "hierarchyExpansionTestData": [
@@ -46,7 +47,8 @@
  "deleteMakatTestData": [
    {
      "materialId": "000000006",
-     "description": "Delete Material from Table Test"
+     "description": "Delete Material from Table Test",
+     "numDataObject": 1
    }
  ]
 }

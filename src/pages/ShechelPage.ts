@@ -1,5 +1,10 @@
-import { Page, Locator, expect } from '@playwright/test';
+import { Page, Locator, expect, Response } from '@playwright/test';
 import { MainPage } from './MainPage';
+import {
+  isFailureStatus,
+  isServerFailure,
+  describeResponseFailure,
+} from '../utils/httpFailures';
 
 /**
  * ShechelPage - Extends {@link MainPage} with workflow-specific logic for the
@@ -60,7 +65,15 @@ export class ShechelPage extends MainPage {
   }
 
   private deleteConfirmBtn(materialId: string): Locator {
-    return this.page.getByTestId(`row-delete-current-type-${materialId}`);
+    // The "delete current type" confirm control. The per-material test-id now
+    // lives on the inner <span> (`row-delete-current-type-label-${materialId}`)
+    // while the clickable <button> carries the stable, generic attributes
+    // `data-delete-control="action"` + `data-type="confirm"`. Target the
+    // button that CONTAINS this material's label span so the click lands on
+    // the button (not the span) and stays scoped to the right material.
+    return this.page.locator(
+      `button[data-delete-control="action"][data-type="confirm"]:has([data-testid="row-delete-current-type-label-${materialId}"])`,
+    );
   }
 
   private hierarchyExpandTooltip(unitId: number): Locator {
@@ -150,8 +163,73 @@ export class ShechelPage extends MainPage {
       await this.header.saveBtn.waitFor({ state: 'attached', timeout: 5000 });
       await expect(this.header.saveBtn).toBeEnabled({ timeout: 15000 });
 
+      // Deterministically wait for the SAVE network call to complete before
+      // returning. Relying on `networkidle` here is unreliable (the SPA keeps
+      // long-poll connections open) AND dangerous: callers reload the page
+      // right after save, so if we return before the mutation lands the save
+      // is lost.
+      //
+      // CRITICAL: we must match the save mutation REGARDLESS of status code.
+      // A previous version only matched 2xx–3xx, so a backend rejection
+      // (e.g. HTTP 502 "ההיררכיה תחתיך השתנתה") never matched, the waiter
+      // timed out, and the failure was silently swallowed — surfacing much
+      // later as a confusing value mismatch. Now we catch the response, and
+      // if it is a failure status we THROW with the full method/URL/status/
+      // body so the report says exactly what went wrong.
+      const savePromise: Promise<Response | null> = this.page
+        .waitForResponse(
+          (resp) => {
+            const req = resp.request();
+            return (
+              /POST|PUT|PATCH/.test(req.method()) &&
+              resp.url().includes('162.55.55.124')
+            );
+          },
+          { timeout: 20000 },
+        )
+        .catch(() => {
+          // No distinct mutation response observed within the window. Some
+          // saves may be batched/debounced and not produce a response we can
+          // match — that case is genuinely ambiguous, so we proceed and let
+          // the post-reload assertion be the ultimate source of truth.
+          console.warn(`[saveMaterial] No matching save response observed; proceeding.`);
+          return null;
+        });
+
       await this.header.saveBtn.click();
-      await this.waitForNetworkIdle();
+      const saveResponse = await savePromise;
+
+      // If we DID observe the save response and it failed, abort NOW with a
+      // detailed message. Continuing here would lose the unsaved value and
+      // fail later as a misleading downstream symptom.
+      if (saveResponse && isFailureStatus(saveResponse.status())) {
+        const detail = await describeResponseFailure(saveResponse, 'saveMaterial');
+        throw new Error(
+          `${detail}\nThe material was NOT saved — aborting so this surfaces as a save ` +
+            `failure rather than a later value mismatch. ` +
+            (isServerFailure(saveResponse.status())
+              ? `This 5xx often means the hierarchy beneath the unit changed (parallel ` +
+                `worker contention); consider serializing overlapping subtrees.`
+              : `This 4xx is a permanent client error (bad data or locked unit).`),
+        );
+      }
+
+      // Brief settle so the backend commit is durable before any reload.
+      await this.page.waitForLoadState('domcontentloaded');
+
+      // Save on this app = lock + aggregation recalculation, which keeps the
+      // saved units in a "locked / processing" state for a short while after
+      // the first response lands. Callers that immediately unlock/move the
+      // hierarchy (the HC flows) otherwise get
+      //   "יחידת המסך נעולה, אין אפשרות לבצע את הפעולה"
+      //   ("the screen unit is locked, action not allowed").
+      // Give the backend time to finish settling before returning. Override
+      // via SAVE_SETTLE_MS env var (default 3000ms).
+      const settleMs = Number(process.env.SAVE_SETTLE_MS ?? 3000);
+      if (settleMs > 0) {
+        console.info(`[saveMaterial] Waiting ${settleMs}ms for save to settle on the backend...`);
+        await this.page.waitForTimeout(settleMs);
+      }
       console.info(`[saveMaterial] Material saved successfully`);
     } catch (error) {
       console.error(`[saveMaterial] Failed to save material: ${error}`);
@@ -180,8 +258,40 @@ export class ShechelPage extends MainPage {
       });
 
       if (await confirmBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        // Arm a waiter for the DELETE mutation BEFORE clicking confirm, so a
+        // backend rejection is surfaced as a clear "delete request failed"
+        // error instead of a later "material still in row" symptom. We match
+        // any mutating method to the backend host regardless of status, then
+        // abort if the observed response is a failure.
+        const deletePromise: Promise<Response | null> = this.page
+          .waitForResponse(
+            (resp) => {
+              const req = resp.request();
+              return (
+                /DELETE|POST|PUT|PATCH/.test(req.method()) &&
+                resp.url().includes('162.55.55.124')
+              );
+            },
+            { timeout: 15000 },
+          )
+          .catch(() => {
+            // No distinct delete response observed — ambiguous, so continue
+            // and let the caller's post-delete assertion be the source of truth.
+            console.warn(`[deleteMakat] No matching delete response observed; proceeding.`);
+            return null;
+          });
+
         await confirmBtn.click();
         console.log(`[deleteMakat] Delete confirmation button clicked for material ${materialId}`);
+
+        const deleteResponse = await deletePromise;
+        if (deleteResponse && isFailureStatus(deleteResponse.status())) {
+          const detail = await describeResponseFailure(deleteResponse, 'deleteMakat');
+          throw new Error(
+            `${detail}\nMaterial ${materialId} was NOT deleted — aborting so this surfaces as a ` +
+              `delete-request failure rather than a later "material still present" symptom.`,
+          );
+        }
       } else {
         console.warn(`[deleteMakat] Delete confirmation button not found for material ${materialId}`);
         return false;
@@ -201,6 +311,11 @@ export class ShechelPage extends MainPage {
   async expandHierarchyToLeaf(materialId: string, unitsToExpand: number[]): Promise<boolean> {
     console.info(`[expandHierarchyToLeaf] Expanding path for ${materialId}: ${unitsToExpand.join(' -> ')}`);
     let expanded = false;
+
+    // The grid often mounts behind the `AmmoLoading` overlay right after a
+    // reload / makat-add. Interacting through it makes carousel clicks and
+    // hovers silent no-ops, so settle the page before we touch anything.
+    await this.waitForAmmoLoadingGone();
 
     // Reset the carousel to its leftmost page before we start. Without
     // this, residual pagination state from a previous call (e.g. the
@@ -266,12 +381,37 @@ export class ShechelPage extends MainPage {
         break;
       }
 
-      // Make sure the cell is in view, then hover to reveal the network button
-      try {
-        await cell.first().scrollIntoViewIfNeeded({ timeout: 2000 });
-        await cell.first().hover({ timeout: 2000 });
-      } catch (e) {
-        console.warn(`[expandHierarchyToLeaf] Could not hover cell for unit ${unitId}: ${e}`);
+      // Make sure the cell is in view, then hover to reveal the network button.
+      //
+      // Two transient conditions broke this in the hierarchy-change tests and
+      // are handled here:
+      //   1. The `AmmoLoading` overlay (aria-busy) intercepts pointer events,
+      //      so the hover times out and the network button never appears
+      //      (seen as AFTER=MISSING on the post-move re-expand). Wait it out
+      //      BEFORE hovering.
+      //   2. The cell can detach from the DOM mid-hover while the grid
+      //      re-renders ("Element is not attached to the DOM"). Re-resolve the
+      //      cell and retry a couple of times instead of giving up.
+      const HOVER_ATTEMPTS = 3;
+      for (let h = 0; h < HOVER_ATTEMPTS; h++) {
+        await this.waitForAmmoLoadingGone();
+        try {
+          await cell.first().scrollIntoViewIfNeeded({ timeout: 2000 });
+          await cell.first().hover({ timeout: 2000 });
+          break;
+        } catch (e) {
+          if (h === HOVER_ATTEMPTS - 1) {
+            console.warn(`[expandHierarchyToLeaf] Could not hover cell for unit ${unitId}: ${e}`);
+            break;
+          }
+          // Re-resolve the cell — the previous handle may be stale after a
+          // re-render — and wait for it to re-attach before retrying.
+          cell = this.cellForUnit(materialId, unitId);
+          await cell
+            .first()
+            .waitFor({ state: 'attached', timeout: 2000 })
+            .catch(() => undefined);
+        }
       }
 
       const networkBtn = this.networkButton(materialId, unitId);
@@ -400,6 +540,9 @@ export class ShechelPage extends MainPage {
         if (!Number.isFinite(childUnitId) || unitsToExpand.includes(childUnitId)) continue;
 
         try {
+          // Clear any loading overlay first — it intercepts the hover and
+          // would make this sibling look un-expandable.
+          await this.waitForAmmoLoadingGone();
           await childCell.scrollIntoViewIfNeeded({ timeout: 2000 });
           await childCell.hover({ timeout: 2000 });
         } catch {
@@ -736,8 +879,6 @@ export class ShechelPage extends MainPage {
         try {
           await anchorInput.click();
           await this.waitForNetworkIdle();
-          await anchorInput.fill('');
-          await this.page.waitForTimeout(150);
           await anchorInput.fill(unitId.toString());
 
           await anchorOption.waitFor({ state: 'visible', timeout: 8_000 });

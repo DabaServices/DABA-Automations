@@ -434,9 +434,9 @@ function buildRegularEntry(
     materialId: matSeq.next(),
     description: `${template.description ?? 'Test'} [unit ${gdudId} / ${LEVEL_LABEL[lvl] ?? `L${lvl}`}]`,
     unitsToExpand: expandPath,
-    numDataGenerated: expandPath.length,
   };
   delete (out as Record<string, unknown>).numDataObject;
+  delete (out as Record<string, unknown>).numDataGenerated;
   return out;
 }
 
@@ -721,6 +721,27 @@ function buildChangeEntry(
   const oldLabel = LEVEL_LABEL[idx.byId.get(move.oldParent)!.level as number] ?? '?';
   const newLabel = LEVEL_LABEL[idx.byId.get(move.newParent)!.level as number] ?? '?';
 
+  // ── Full backend write-set for parallel-safe clustering ──────────────────
+  // A move makes the backend read/write FAR more rows than the explicit
+  // `unitsToExpand` / `newHierarchy` path units: the moved unit drags its
+  // ENTIRE descendant subtree with it, and aggregation re-sums BOTH the old-
+  // and new-parent chains. Two entries whose write-sets overlap MUST run
+  // serially, so we emit the union here and the clusterer keys on it.
+  //
+  // The system ROOT (Matkal) is deliberately EXCLUDED: every chain terminates
+  // at the root, so including it would fuse every entry into one giant serial
+  // cluster and destroy parallelism. Root-CHILD mutations (moves in/out of the
+  // root) are serialized separately by the clusterer via `oldParentUnit` /
+  // `newParentUnit`, not by unioning the root here.
+  const claimedSet = new Set<number>([
+    move.unitToMove,
+    ...descendantsOf(move.unitToMove, idx),
+    ...pathToRoot(move.oldParent, idx),
+    ...pathToRoot(move.newParent, idx),
+  ]);
+  claimedSet.delete(ROOT_UNIT_ID);
+  const claimedUnits = [...claimedSet].sort((a, b) => a - b);
+
   return {
     materialId: matSeq.next(),
     description: `${template.description ?? 'Move'} - Move ${unitLabel}(${move.unitToMove}) from ${oldLabel}(${move.oldParent}) to ${newLabel}(${move.newParent}) [${move.kind}]`,
@@ -730,6 +751,7 @@ function buildChangeEntry(
     unitToMove: move.unitToMove,
     newParentUnit: move.newParent,
     oldParentUnit: move.oldParent,
+    claimedUnits,
   };
 }
 

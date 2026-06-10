@@ -1,5 +1,6 @@
 import { APIRequestContext } from '@playwright/test';
 import { BACKEND_URL } from '../../playwright.config';
+import { invalidateTopLevelUnitsCache } from './apiHelpers';
 
 /**
  * Hierarchy Change API
@@ -45,7 +46,8 @@ export async function updateUnitHierarchy(
   requestingUnitId?: number,
   screenDate?: string
 ): Promise<any> {
-  const url = `${API_BASE_URL}/units/hierarchy?user=${encodeURIComponent(DEFAULT_USER)}`;
+  // Auth/identity goes in headers (user, screendate, unit) — NOT in the URL.
+  const url = `${API_BASE_URL}/units/hierarchy`;
   
   // Use rootUnit as requestingUnitId if not provided
   const unitMakingRequest = requestingUnitId ?? rootUnit;
@@ -60,11 +62,9 @@ export async function updateUnitHierarchy(
   };
 
   const headers = {
-    'Content-Type': 'application/json',
-    'authorization': 'Bearer',
-    'unit': unitMakingRequest.toString(),
     'screendate': currentDate,
-    'user': DEFAULT_USER,
+    'username': DEFAULT_USER,
+    'unit': String(unitMakingRequest),
   };
 
   console.info(`[updateUnitHierarchy] Moving unit ${lowerUnit} from current parent to new parent ${upperUnit} as unit ${unitMakingRequest}`);
@@ -80,10 +80,21 @@ export async function updateUnitHierarchy(
   }
   
   if (!response.ok()) {
-    const errorMsg = `Failed to update hierarchy for unit ${lowerUnit}. Status: ${status}`;
+    const bodyPreview =
+      typeof responseBody === 'string'
+        ? responseBody.slice(0, 200)
+        : JSON.stringify(responseBody).slice(0, 200);
+    const errorMsg = `Failed to update hierarchy for unit ${lowerUnit}. Status: ${status}. Body: ${bodyPreview}`;
     console.error(`[updateUnitHierarchy] ${errorMsg}`);
     throw new Error(errorMsg);
   }
   
+  // A successful move can change the set of top-level units (children of
+  // Matkal=1) — e.g. moving a unit TO or FROM the top level. Invalidate the
+  // cached top-level list so the next `lockCompleteHierarchy` sends the LIVE
+  // set to /reports/committees/report instead of a stale one (which the
+  // backend rejects with 502 "ההיררכיה תחתיך השתנתה, יש לרענן את המסך").
+  invalidateTopLevelUnitsCache();
+
   return responseBody;
 }

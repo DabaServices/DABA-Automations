@@ -48,7 +48,8 @@ export async function lockUnitStatus(
   screenDate?: string,
   updateHierarchyOverride?: boolean
 ): Promise<any> {
-  const url = `${API_BASE_URL}/statuses?user=${encodeURIComponent(DEFAULT_USER)}`;
+  // Auth/identity goes in headers (user, screendate, unit) — NOT in the URL.
+  const url = `${API_BASE_URL}/statuses`;
   
   // Use today's date if not provided
   const currentDate = screenDate || getTodayDate();
@@ -65,11 +66,9 @@ export async function lockUnitStatus(
   };
 
   const headers = {
-    'Content-Type': 'application/json',
-    'authorization': 'Bearer',
-    'unit': requestingUnitId.toString(),
     'screendate': currentDate,
-    'user': DEFAULT_USER,
+    'username': DEFAULT_USER,
+    'unit': String(requestingUnitId),
   };
 
   const statusText = lockStatus === 1 ? 'LOCK' : 'UNLOCK';

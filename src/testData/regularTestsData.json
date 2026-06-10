@@ -2,97 +2,104 @@
   "hierarchicalAggregationTestData": [
     {
       "materialId": "000000006",
-      "description": "Hierarchical Aggregation Test - Matkal Level [unit 710 / Gdud]",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 401 / Gdud]",
       "unitsToExpand": [
-        110,
-        710
-      ],
-      "numDataGenerated": 2
+        2,
+        11,
+        101,
+        401
+      ]
     },
     {
       "materialId": "000000006",
-      "description": "Hierarchical Aggregation Test - Matkal Level [unit 985 / Gdud]",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 402 / Gdud]",
       "unitsToExpand": [
-        25,
-        385,
-        985
-      ],
-      "numDataGenerated": 3
+        3,
+        12,
+        102,
+        402
+      ]
     }
   ],
   "makatValidationTestData": [
     {
       "index": 0,
       "materialId": "000000006",
-      "description": "Material 1 - Basic Validation"
+      "description": "Material 1 - Basic Validation [unit 403 / Gdud]",
+      "unitsToExpand": [
+        4,
+        13,
+        103,
+        403
+      ]
     }
   ],
   "hierarchyExpansionTestData": [
     {
       "materialId": "000000006",
-      "description": "Hierarchical Aggregation Test - Matkal Level [unit 685 / Gdud]",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 404 / Gdud]",
       "unitsToExpand": [
-        25,
-        385,
-        685
-      ],
-      "numDataGenerated": 3
+        5,
+        14,
+        104,
+        404
+      ]
     },
     {
       "materialId": "000000006",
-      "description": "Hierarchical Aggregation Test - Matkal Level [unit 895 / Gdud]",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 405 / Gdud]",
       "unitsToExpand": [
-        25,
-        295,
-        895
-      ],
-      "numDataGenerated": 3
+        6,
+        15,
+        105,
+        405
+      ]
     }
   ],
   "leafCellClickabilityTestData": [
     {
       "materialId": "000000006",
-      "description": "Hierarchical Aggregation Test - Matkal Level [unit 595 / Gdud]",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 406 / Gdud]",
       "unitsToExpand": [
-        25,
-        295,
-        595
-      ],
-      "numDataGenerated": 3
+        7,
+        16,
+        106,
+        406
+      ]
     },
     {
       "materialId": "000000006",
-      "description": "Hierarchical Aggregation Test - Matkal Level [unit 805 / Gdud]",
+      "description": "Hierarchical Aggregation Test - Matkal Level [unit 407 / Gdud]",
       "unitsToExpand": [
-        25,
-        205,
-        805
-      ],
-      "numDataGenerated": 3
+        8,
+        17,
+        107,
+        407
+      ]
     }
   ],
   "saveFunctionalityTestData": [
     {
       "materialId": "000000006",
-      "description": "Save Button Functionality Test [unit 505 / Gdud]",
+      "description": "Save Button Functionality Test [unit 408 / Gdud]",
       "testValue": 5,
       "unitsToExpand": [
-        25,
-        205,
-        505
-      ],
-      "numDataGenerated": 3
+        9,
+        18,
+        108,
+        408
+      ]
     },
     {
       "materialId": "000000006",
-      "description": "Save Button Functionality Test [unit 983 / Gdud]",
+      "description": "Save Button Functionality Test [unit 409 / Gdud]",
       "testValue": 5,
       "unitsToExpand": [
-        23,
-        383,
-        983
-      ],
-      "numDataGenerated": 3
+        10,
+        19,
+        109,
+        409
+      ]
     }
   ],
   "commentFunctionalityTestData": [
@@ -106,7 +113,13 @@
   "deleteMakatTestData": [
     {
       "materialId": "000000006",
-      "description": "Delete Material from Table Test"
+      "description": "Delete Material from Table Test [unit 410 / Gdud]",
+      "unitsToExpand": [
+        2,
+        20,
+        110,
+        410
+      ]
     }
   ]
 }

@@ -75,7 +75,8 @@ export async function fetchHierarchyUnits(
   screenDate: string = todayIso(),
   rootUnit: string = DEFAULT_ROOT_UNIT
 ): Promise<HierarchyUnit[]> {
-  const url = `${HIERARCHY_URL}?user=${encodeURIComponent(user)}`;
+  // Auth/identity goes in headers (user, screendate, unit) — NOT in the URL.
+  const url = HIERARCHY_URL;
 
   // Retry transient network errors (DNS drop, connection reset, 5xx) up to
   // 4 times with exponential backoff. Each retry waits longer to give the
@@ -86,18 +87,24 @@ export async function fetchHierarchyUnits(
     try {
       const response = await request.get(url, {
         headers: {
-          'Content-Type': 'application/json',
-          authorization: 'Bearer',
-          unit: rootUnit,
           screendate: screenDate,
-          user,
+          username: user,
         },
         timeout: 20_000,
       });
 
       if (!response.ok()) {
+        // Surface the FULL failure detail (status + body) so a failed read is
+        // self-explanatory in the report, consistent with the other API
+        // helpers (reportUnits / lockUnitStatus / updateUnitHierarchy).
+        let bodyPreview: string;
+        try {
+          bodyPreview = JSON.stringify(await response.json()).slice(0, 200);
+        } catch {
+          bodyPreview = (await response.text().catch(() => '<unreadable body>')).slice(0, 200);
+        }
         throw new Error(
-          `[fetchHierarchyUnits] GET ${url} failed with status ${response.status()}`
+          `[fetchHierarchyUnits] GET ${url} failed with status ${response.status()}. Body: ${bodyPreview}`
         );
       }
 

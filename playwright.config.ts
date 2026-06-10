@@ -31,6 +31,17 @@ export default defineConfig({
   // data fetches, network idle bouncing, etc.). CI gets a second retry.
   retries: process.env.CI ? 2 : 1,
 
+  // Reporters: keep the human-readable list output in the terminal, the
+  // built-in HTML report, and add Allure for rich, shareable reports.
+  // Generate the Allure report after a run with:
+  //   npx allure generate allure-results --clean -o allure-report
+  //   npx allure open allure-report
+  reporter: [
+    ['list'],
+    ['html', { open: 'never' }],
+    ['allure-playwright', { resultsDir: 'allure-results' }],
+  ],
+
   // 3. הגדרות בסיסיות לכל בדיקה
   use: {
     // הכתובת של האתר שלך 
@@ -48,8 +59,9 @@ export default defineConfig({
       // Slow-mo delay between actions (ms). Override via SLOW_MO env var.
       // Default 0 — no artificial delay. Pagination, network and React
       // render time alone provide plenty of "observation latency" in
-      // headed mode. Set SLOW_MO=50 if you really want a slight pause.
-      slowMo: Number(process.env.SLOW_MO ?? 200),
+      // headed mode. Set SLOW_MO=50 (or higher) when you want to watch a
+      // run step-by-step.
+      slowMo: Number(process.env.SLOW_MO ?? 0),
     },
     
     // Add longer page load timeout for network requests

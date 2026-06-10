@@ -127,16 +127,27 @@ saveFunctionalityTestData.forEach((testData) => {
 
       await withPhase('Reload page after save', ctx, async () => {
         await hierarchyPage.page.reload();
-        await hierarchyPage.page.waitForLoadState('networkidle');
+        // After a reload the SPA must re-authenticate, re-fetch the
+        // hierarchy and re-render the table before any row exists in the
+        // DOM. Wait for the page to actually be ready (combobox rendered)
+        // rather than reading the DOM instantly.
+        await hierarchyPage.waitForMakatComboboxReady(30000);
       });
 
-      isMaterialInRow = await withPhase(
+      // Poll for the row to (re)appear after reload instead of reading the
+      // DOM once — the table hydrates asynchronously, so an instant read can
+      // race ahead of the render and report a false negative.
+      let persisted = await withPhase(
         'Verify material in row after reload',
         ctx,
-        () => hierarchyPage.verifyMaterialIdInRow(testData.materialId),
+        () =>
+          hierarchyPage
+            .waitForMaterialRow(testData.materialId, 15000)
+            .then(() => true)
+            .catch(() => false),
       );
       expect(
-        isMaterialInRow,
+        persisted,
         `[ASSERTION: makat-not-persisted] Material ${testData.materialId} did NOT persist after page reload — save was not committed to the backend.`,
       ).toBe(true);
       console.log(

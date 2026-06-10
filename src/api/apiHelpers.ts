@@ -1,6 +1,6 @@
 import { APIRequestContext } from '@playwright/test';
 import { lockUnitStatus } from './lockunitstatus';
-import { reportUnits } from './reportUnits';
+import { reportUnits, ClientError } from './reportUnits';
 import { BACKEND_URL } from '../../playwright.config';
 import { fetchHierarchyUnits } from './dynamicHierarchyDiscovery';
 
@@ -79,18 +79,41 @@ const PIKUDS_API_URL = `${BACKEND_URL}/units/pikuds`;
  * We now derive the list from `/units/hierarchy`, which is the same
  * endpoint the data-builder uses, so the two are always in sync.
  *
- * Result is cached per APIRequestContext for 30 s to avoid hammering the
- * hierarchy endpoint on every lock call in a serial test cluster.
+ * Result is cached at MODULE scope (per worker process) for 60 s. Playwright
+ * gives every test a fresh `APIRequestContext` fixture, so a per-context
+ * cache (e.g. WeakMap) effectively never hits across tests. A module-level
+ * cache survives the whole worker run and saves a ~1000-row hierarchy GET
+ * on every `lockCompleteHierarchy` after the first.
+ *
+ * The `request` arg is still required (for the network call when the cache
+ * misses), but is NOT part of the cache key.
  */
-const TOP_UNITS_CACHE = new WeakMap<APIRequestContext, { at: number; ids: number[] }>();
-const TOP_UNITS_TTL_MS = 30_000;
+let TOP_UNITS_CACHE: { at: number; ids: number[] } | undefined;
+const TOP_UNITS_TTL_MS = 60_000;
+
+/**
+ * Invalidate the module-level top-level-units cache.
+ *
+ * MUST be called after any operation that changes the set of top-level units
+ * (children of Matkal=1) — most importantly a unit MOVE. Otherwise a later
+ * `lockCompleteHierarchy` sends a stale `lowerUnitsIds` to
+ * `/reports/committees/report`, and the backend rejects with HTTP 502 +
+ * "ההיררכיה תחתיך השתנתה, יש לרענן את המסך" ("the hierarchy below you changed
+ * — please refresh").
+ */
+export const invalidateTopLevelUnitsCache = (): void => {
+  if (TOP_UNITS_CACHE) {
+    console.info('[invalidateTopLevelUnitsCache] Cleared cached top-level units.');
+  }
+  TOP_UNITS_CACHE = undefined;
+};
 
 export const fetchAllTopLevelUnits = async (
-  request: APIRequestContext
+  request: APIRequestContext,
+  force: boolean = false
 ): Promise<number[]> => {
-  const cached = TOP_UNITS_CACHE.get(request);
-  if (cached && Date.now() - cached.at < TOP_UNITS_TTL_MS) {
-    return cached.ids;
+  if (!force && TOP_UNITS_CACHE && Date.now() - TOP_UNITS_CACHE.at < TOP_UNITS_TTL_MS) {
+    return TOP_UNITS_CACHE.ids;
   }
 
   let unitIds: number[];
@@ -117,7 +140,7 @@ export const fetchAllTopLevelUnits = async (
     throw error;
   }
 
-  TOP_UNITS_CACHE.set(request, { at: Date.now(), ids: unitIds });
+  TOP_UNITS_CACHE = { at: Date.now(), ids: unitIds };
   return unitIds;
 };
 
@@ -126,30 +149,55 @@ export const lockCompleteHierarchy = async (
   unitsToLock: number[],
   rootFather: number = 1
 ): Promise<void> => {
-  // If no specific units provided, fetch all top-level units from the API
-  const isLockAll = unitsToLock.length === 0;
-  const effectiveUnits = isLockAll ? await fetchAllTopLevelUnits(request) : unitsToLock;
+  // Backend marker for "the hierarchy below you changed — please refresh".
+  // It comes back as HTTP 502 from /reports/committees/report when the
+  // `lowerUnitsIds` we sent no longer matches the LIVE top-level set (e.g.
+  // a unit was just moved in/out of the top level). The remedy is literally
+  // what the message says: refresh (re-fetch the live list) and retry once.
+  const HIERARCHY_CHANGED = 'ההיררכיה תחתיך השתנתה';
 
-  console.info(`[lockCompleteHierarchy] Locking units: [${effectiveUnits.join(', ')}]${isLockAll ? ' (all top-level units)' : ''}`);
+  const attemptLock = async (forceRefresh: boolean): Promise<void> => {
+    // `force` bypasses the 60 s cache so a post-move retry sees reality.
+    const allTopLevelUnits = await fetchAllTopLevelUnits(request, forceRefresh);
 
-  // Single fetch of top-level units — reuse for both report + (optional) lock-all path.
-  // The 30s WeakMap cache in fetchAllTopLevelUnits means subsequent callers
-  // in the same worker get it for free.
-  const allTopLevelUnits = await fetchAllTopLevelUnits(request);
+    // If no specific units provided, lock the entire top level.
+    const isLockAll = unitsToLock.length === 0;
+    const effectiveUnits = isLockAll ? allTopLevelUnits : unitsToLock;
 
-  try {
+    console.info(
+      `[lockCompleteHierarchy] Locking units: [${effectiveUnits.join(', ')}]${isLockAll ? ' (all top-level units)' : ''}`,
+    );
+
     // Call report API before locking (isLaunching = false)
     await reportUnits(request, effectiveUnits, allTopLevelUnits, false, rootFather);
 
     // When locking all top units, skip updateHierarchy to avoid server hanging on recalculation
     await lockUnitStatus(request, effectiveUnits, rootFather, 1, undefined, isLockAll ? false : undefined);
     console.info(`[lockCompleteHierarchy] Successfully locked all ${effectiveUnits.length} units`);
+  };
+
+  try {
+    await attemptLock(false);
   } catch (error) {
-    console.error(`[lockCompleteHierarchy] Failed to lock units [${effectiveUnits.join(', ')}]: ${error}`);
-    throw error;
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes(HIERARCHY_CHANGED)) {
+      console.warn(
+        `[lockCompleteHierarchy] Backend reported a hierarchy change — refreshing top-level units and retrying once.`,
+      );
+      invalidateTopLevelUnitsCache();
+      try {
+        await attemptLock(true);
+      } catch (retryError) {
+        console.error(`[lockCompleteHierarchy] Retry after refresh still failed: ${retryError}`);
+        throw retryError;
+      }
+    } else {
+      console.error(`[lockCompleteHierarchy] Failed to lock units: ${error}`);
+      throw error;
+    }
   }
 
-  console.info(`[lockCompleteHierarchy] Completed locking all ${effectiveUnits.length} units`);
+  console.info(`[lockCompleteHierarchy] Completed locking.`);
 };
 
 /**
@@ -203,30 +251,70 @@ export const unlockCompleteHierarchy = async (
     }
   }
 
-  // Determine a stable top-to-bottom order:
-  // Walk both paths in parallel by index so higher-level units are unlocked first
+  // Determine a strictly parent-before-child unlock order.
+  //
+  // The backend enforces "a parent must already be unlocked before its child
+  // can be unlocked". The ONLY ordering guaranteed to satisfy that is to walk
+  // the LIVE hierarchy — i.e. the original path — fully top → bottom first,
+  // THEN append any units that exist only on the new path (the destination
+  // branch roots), also top → bottom.
+  //
+  // A previous version interleaved the two paths BY INDEX. That broke every
+  // "move a deep unit up near the root" case (e.g. orig=[2,29,119,419],
+  // new=[419]): the zip placed new[0]=419 (the leaf) at position 2, BEFORE its
+  // ancestors 29/119 were unlocked, so the backend rejected unit 419 with
+  // HTTP 400 "יחידת המסך נעולה" ("the screen unit is locked"). Walking each
+  // path in its own order keeps ancestors strictly ahead of descendants.
   const seen = new Set<number>();
   const unlockOrder: number[] = [];
-  const maxLen = Math.max(originalHierarchy.length, newHierarchy.length);
 
-  for (let i = 0; i < maxLen; i++) {
-    if (i < originalHierarchy.length) {
-      const u = originalHierarchy[i];
-      if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
-    }
-    if (i < newHierarchy.length) {
-      const u = newHierarchy[i];
-      if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
-    }
+  for (const u of originalHierarchy) {
+    if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
+  }
+  for (const u of newHierarchy) {
+    if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
   }
 
+  // Collect genuine unlock failures so we can report them ALL at once and
+  // fail fast, rather than swallowing them and failing later in the move.
+  const unlockFailures: string[] = [];
   for (const unitId of unlockOrder) {
     const fatherId = unitToFather.get(unitId)!;
     try {
       await lockUnitStatus(request, [unitId], fatherId, 0);
     } catch (error) {
-      console.error(`[unlockCompleteHierarchy] Failed to unlock unit ${unitId} (father: ${fatherId}): ${error}`);
+      // Unlock is a HARD PRECONDITION for the move that follows. If it
+      // genuinely fails, the move will fail later as a confusing symptom
+      // ("move not persisted" / "unit locked"), so we must NOT silently
+      // swallow it.
+      //
+      // EXCEPTION: an "already in desired state" conflict (409/422) means the
+      // unit is already unlocked — that's a soft success, so we tolerate it.
+      if (
+        error instanceof ClientError &&
+        (error.status === 409 || error.status === 422)
+      ) {
+        console.info(
+          `[unlockCompleteHierarchy] Unit ${unitId} (father ${fatherId}) returned HTTP ${error.status} — already unlocked, continuing.`,
+        );
+        continue;
+      }
+      console.error(
+        `[unlockCompleteHierarchy] Failed to unlock unit ${unitId} (father: ${fatherId}): ${error}`,
+      );
+      unlockFailures.push(`unit ${unitId} (father ${fatherId}): ${error}`);
     }
+  }
+
+  // Abort if any required unlock failed — fail HERE with the precise unit(s)
+  // and reason, instead of letting the downstream move surface a misleading
+  // late error.
+  if (unlockFailures.length > 0) {
+    throw new Error(
+      `[unlockCompleteHierarchy] ${unlockFailures.length} required unlock(s) failed; the ` +
+        `subsequent move would fail with a misleading symptom. Failures:\n  - ` +
+        unlockFailures.join('\n  - '),
+    );
   }
 
   console.info(`[unlockCompleteHierarchy] Completed – unlocked ${unlockOrder.length} unit(s)`);
