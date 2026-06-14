@@ -57,6 +57,8 @@ export class MainPage {
   protected readonly addMakatButton: Locator;
   /** All content rows in the table */
   protected readonly contentRows: Locator;
+  /** Empty-state message shown when the table has no makats ("אין מק״טים להצגה"). */
+  protected readonly emptyMakatMessage: Locator;
   /** Input inside the makat search field */
   protected readonly makatSearchInput: Locator;
   /** Comment input/textarea field */
@@ -100,11 +102,22 @@ export class MainPage {
     this.makatCombobox = page.getByRole('combobox', { name: /בחירת מק״ט/ });
     this.makatOptions = page.locator('[role="option"]');
 
-    // Add Makat button – the "+" button scoped by its StartAdornment class
-    this.addMakatButton = page.locator('button[data-testid="button"][class*="StartAdornment"]');
+    // Add Makat button – the "+" button. MUST be scoped INSIDE the
+    // material-search combobox: the app now renders a second StartAdornment
+    // button in the `unit-changer-combobox`, so a page-wide
+    // `button[data-testid="button"][class*="StartAdornment"]` matches 2
+    // elements and trips Playwright strict mode. Scoping to the material-search
+    // chips container keeps this unique to the real "+" add button.
+    this.addMakatButton = this.materialSearchChips.locator(
+      'button[data-testid="button"][class*="StartAdornment"]',
+    );
 
     // Table rows
     this.contentRows = page.locator('[data-testid*="content-row"]');
+
+    // Empty-state banner shown when no makats are present in the table.
+    // Matched by its Hebrew text so it works regardless of test-id changes.
+    this.emptyMakatMessage = page.getByText('אין מק״טים להצגה');
 
     // Makat search input (inside the search field container)
     this.makatSearchInput = this.makatSearchField.locator('input').first();
@@ -710,6 +723,13 @@ export class MainPage {
   /**
    * High-level helper: select a Makat from the dropdown and add it to the table.
    * Skips the operation if the material is already present.
+   *
+   * Empty-table handling: when the table shows the "אין מק״טים להצגה" ("no
+   * makats to display") empty-state banner — or the freshly added row simply
+   * doesn't render — we treat the add as not-yet-successful and retry the WHOLE
+   * operation (select → click "+" → confirm row), reloading between attempts.
+   * This is stronger than only retrying the dropdown selection, because an
+   * empty table means the previous add never actually landed a makat.
    */
   async addMakatFromDropdown(materialIdOrText: string): Promise<void> {
     console.info(`[addMakatFromDropdown] Checking if material already exists: ${materialIdOrText}`);
@@ -723,25 +743,58 @@ export class MainPage {
       console.info(`[addMakatFromDropdown] Material not found, adding: ${materialIdOrText}`);
 
       const maxRetries = 3;
+      let lastError: unknown;
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
+          // If the table is showing the empty-state banner, log it — the add
+          // below is exactly what resolves it.
+          if (await this.isMakatTableEmpty()) {
+            console.info(
+              `[addMakatFromDropdown] Table is empty ("אין מק״טים להצגה") — entering makat ${materialIdOrText} (attempt ${attempt}).`
+            );
+          }
+
           await this.selectMakatFromDropdown(materialIdOrText);
-          break;
+          await this.addMakatButton.click();
+          await this.waitForMaterialRow(materialIdOrText);
+
+          console.info(`[addMakatFromDropdown] Successfully added material: ${materialIdOrText}`);
+          return;
         } catch (error) {
-          if (attempt === maxRetries) throw error;
-          console.warn(`[addMakatFromDropdown] Selection attempt ${attempt} failed, retrying...`);
+          lastError = error;
+          if (attempt === maxRetries) break;
+          console.warn(
+            `[addMakatFromDropdown] Add attempt ${attempt} failed (table empty or row missing), retrying...`
+          );
           await this.goto();
           await this.waitForMakatComboboxReady(30000);
         }
       }
 
-      await this.addMakatButton.click();
-      await this.waitForMaterialRow(materialIdOrText);
-
-      console.info(`[addMakatFromDropdown] Successfully added material: ${materialIdOrText}`);
+      throw lastError;
     } catch (error) {
       console.error(`[addMakatFromDropdown] Failed to add material ${materialIdOrText}: ${error}`);
       throw error;
+    }
+  }
+
+  /**
+   * Returns true when the table is showing the empty-state banner
+   * ("אין מק״טים להצגה") AND no content rows are rendered. Used to decide
+   * whether a makat must be entered.
+   */
+  async isMakatTableEmpty(): Promise<boolean> {
+    try {
+      const bannerVisible = await this.emptyMakatMessage
+        .first()
+        .isVisible()
+        .catch(() => false);
+      if (bannerVisible) return true;
+      // Fallback: no banner located, but also zero rows → treat as empty.
+      const rowCount = await this.contentRows.count().catch(() => 0);
+      return rowCount === 0;
+    } catch {
+      return false;
     }
   }
 

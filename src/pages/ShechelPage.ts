@@ -5,6 +5,21 @@ import {
   isServerFailure,
   describeResponseFailure,
 } from '../utils/httpFailures';
+import { BACKEND_URL } from '../../playwright.config';
+
+/**
+ * Host portion of the configured backend (e.g. "localhost:3000" or
+ * "auto-api.162.55.55.124.nip.io"). Used to recognise backend mutation
+ * responses regardless of environment, instead of a hardcoded IP. Falls back
+ * to the raw string if BACKEND_URL is not a parseable URL.
+ */
+const BACKEND_HOST = (() => {
+  try {
+    return new URL(BACKEND_URL).host;
+  } catch {
+    return BACKEND_URL;
+  }
+})();
 
 /**
  * ShechelPage - Extends {@link MainPage} with workflow-specific logic for the
@@ -182,7 +197,7 @@ export class ShechelPage extends MainPage {
             const req = resp.request();
             return (
               /POST|PUT|PATCH/.test(req.method()) &&
-              resp.url().includes('162.55.55.124')
+              resp.url().includes(BACKEND_HOST)
             );
           },
           { timeout: 20000 },
@@ -269,7 +284,7 @@ export class ShechelPage extends MainPage {
               const req = resp.request();
               return (
                 /DELETE|POST|PUT|PATCH/.test(req.method()) &&
-                resp.url().includes('162.55.55.124')
+                resp.url().includes(BACKEND_HOST)
               );
             },
             { timeout: 15000 },
@@ -372,6 +387,49 @@ export class ShechelPage extends MainPage {
           );
           await this.revealUnitInCarousel(materialId, unitId);
           cell = this.rowCell(materialId, unitId);
+
+          // First-hop recovery (carousel render-race).
+          // The carousel only lists LOCKED top-level units, and it rebuilds
+          // its visible set from a hierarchy fetch on page load. Adding the
+          // makat just before this re-renders the carousel; a top unit that
+          // WAS locked & on the carousel during `beforeEach` can momentarily
+          // drop off the visible pages, so the pagination above exhausts the
+          // "next" arrow without ever finding it. That made the BEFORE-phase
+          // expand break on hop 0 and the moved unit be reported BEFORE=MISSING
+          // (the 126 / [3 → 36 → 126] case), even though the unit was locked.
+          //
+          // Mirror exactly what the post-move flow already does to recover:
+          // reload (re-fetches the hierarchy → the locked top re-appears),
+          // re-add the makat (idempotent — skips if already present), reset
+          // the carousel, and re-attempt the reveal. This is SAFE in the
+          // BEFORE phase because no values have been set/saved yet, so a
+          // reload loses nothing. We deliberately keep this scoped to the
+          // FIRST hop (a top-level unit); deeper units are never revealed by
+          // carousel pagination and must come from a network-button expand.
+          const FIRST_HOP_RELOADS = 2;
+          for (let r = 0; r < FIRST_HOP_RELOADS && !(await cell.count()); r++) {
+            console.warn(
+              `[expandHierarchyToLeaf] Top unit ${unitId} not on carousel after pagination — ` +
+                `reloading to re-fetch the hierarchy and re-revealing (attempt ${r + 1}/${FIRST_HOP_RELOADS}). ` +
+                `This recovers a locked top unit that dropped off the carousel when the makat was added.`,
+            );
+            try {
+              await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
+              await this.waitForMakatComboboxReady(30_000);
+              // Re-add the makat row dropped by the reload (idempotent — the
+              // helper returns early if the material is already present).
+              await this.addMakatFromDropdown(materialId);
+              await this.waitForMaterialRow(materialId, 15_000);
+              await this.waitForAmmoLoadingGone();
+              await this.resetCarouselToLeftmost().catch(() => undefined);
+              await this.revealUnitInCarousel(materialId, unitId);
+              cell = this.rowCell(materialId, unitId);
+            } catch (e) {
+              console.warn(
+                `[expandHierarchyToLeaf] First-hop reload recovery attempt ${r + 1} failed: ${e}`,
+              );
+            }
+          }
         }
       }
 

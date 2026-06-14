@@ -3,7 +3,7 @@ import { defineConfig, devices } from '@playwright/test';
 // ─────────────────────────────────────────────────────────────────────────────
 // Centralized URLs for the application under test.
 // Override at runtime via environment variables, e.g.:
-//   FRONTEND_URL=http://dev.162.55.55.124.nip.io/ npx playwright test
+//   FRONTEND_URL=http://localhost:5173/ npx playwright test
 //   BACKEND_URL=http://localhost:3000 npx playwright test
 // ─────────────────────────────────────────────────────────────────────────────
 export const FRONTEND_URL =
@@ -24,8 +24,14 @@ export default defineConfig({
   // units (see src/fixtures/parallelGroups.ts), so different clusters can
   // safely run in parallel across workers without lock / move / aggregation
   // contention. Tune workers down to 1 if you need fully sequential debug.
+  //
+  // Worker count is bounded by the LARGEST serial cluster: wall-time can't go
+  // below the biggest `describe.serial` block (it runs on one worker). After
+  // the write-set-aware data-builder change, the hierarchy-change suite peaks
+  // at ~26 tests in its largest cluster spread over ~12 clusters, so 5 local
+  // workers saturate the available parallelism; more would sit idle.
   fullyParallel: true,
-  workers: process.env.CI ? 2 : 4,
+  workers: process.env.CI ? 2 : 5,
 
   // Allow one retry to absorb transient UI hiccups (component remounts after
   // data fetches, network idle bouncing, etc.). CI gets a second retry.

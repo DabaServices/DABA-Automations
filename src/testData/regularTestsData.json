@@ -4,9 +4,6 @@
       "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 401 / Gdud]",
       "unitsToExpand": [
-        2,
-        11,
-        101,
         401
       ]
     },
@@ -14,7 +11,6 @@
       "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 402 / Gdud]",
       "unitsToExpand": [
-        3,
         12,
         102,
         402
@@ -29,7 +25,7 @@
       "unitsToExpand": [
         4,
         13,
-        103,
+        193,
         403
       ]
     }
@@ -41,7 +37,7 @@
       "unitsToExpand": [
         5,
         14,
-        104,
+        194,
         404
       ]
     },
@@ -51,7 +47,7 @@
       "unitsToExpand": [
         6,
         15,
-        105,
+        195,
         405
       ]
     }
@@ -62,8 +58,8 @@
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 406 / Gdud]",
       "unitsToExpand": [
         7,
-        16,
-        106,
+        97,
+        187,
         406
       ]
     },
@@ -72,7 +68,7 @@
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 407 / Gdud]",
       "unitsToExpand": [
         8,
-        17,
+        98,
         107,
         407
       ]
@@ -85,7 +81,7 @@
       "testValue": 5,
       "unitsToExpand": [
         9,
-        18,
+        99,
         108,
         408
       ]
@@ -96,7 +92,7 @@
       "testValue": 5,
       "unitsToExpand": [
         10,
-        19,
+        100,
         109,
         409
       ]
@@ -115,9 +111,6 @@
       "materialId": "000000006",
       "description": "Delete Material from Table Test [unit 410 / Gdud]",
       "unitsToExpand": [
-        2,
-        20,
-        110,
         410
       ]
     }

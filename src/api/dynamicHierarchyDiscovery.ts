@@ -23,6 +23,12 @@ export interface HierarchyUnit {
   id: number;
   level: number;
   parent?: { id: number } | null;
+  /**
+   * When `false`, the unit has NO gdud breakdown beneath it and the product
+   * renders its value cells as disabled (no value can be set/read). Such units
+   * must be excluded from value-based test data. May be absent on some units.
+   */
+  isEmergencyUnit?: boolean;
   // The API returns more fields (name, etc.) – we only type what we use.
   [key: string]: unknown;
 }

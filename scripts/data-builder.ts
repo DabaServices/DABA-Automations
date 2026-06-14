@@ -70,26 +70,77 @@ const LEVEL_LABEL: Record<number, string> = {
   4: 'Gdud',
 };
 
-// Slot pattern for HIERARCHY_CHANGE arrays — matches the hand-curated layout
-// in changeHierarchyData.json (12 slots per array).
-type MoveKind = 'INSIDE' | 'OUTSIDE';
+// Slot pattern for HIERARCHY_CHANGE arrays — a 40-scenario permutation matrix
+// derived from the live 5-level org tree:
+//   Level 0: Matkal (root) · 1: Pikud · 2: Ugda · 3: Hativa · 4: Gdud
+//
+// MoveKind dimensions:
+//   INSIDE     → upward vertical move to a parent ON the unit's ancestor chain
+//   OUTSIDE    → upward vertical move to a parent on a DIFFERENT branch
+//   HORIZONTAL → re-parent under a DIFFERENT node at the SAME parent level
+//   NO_OP      → re-parent onto the unit's CURRENT parent (idempotency probe)
+//   TO_ROOT    → re-parent directly under Matkal (level 0)
+type MoveKind = 'INSIDE' | 'OUTSIDE' | 'HORIZONTAL' | 'NO_OP' | 'TO_ROOT';
+
 interface SlotSpec {
-  unitLevel: number; // level of the unit being moved
+  unitLevel: number; // 1=Pikud, 2=Ugda, 3=Hativa, 4=Gdud
   kind: MoveKind;
+  targetLevel?: number; // Optional explicit target (new-parent) level constraint
 }
+
+// Exactly 40 slots: 10 HORIZONTAL · 4 NO_OP · 6 TO_ROOT · 20 vertical.
 const HC_SLOT_PATTERN: SlotSpec[] = [
-  { unitLevel: 2, kind: 'OUTSIDE' }, // Ugda
-  { unitLevel: 2, kind: 'INSIDE' },
-  { unitLevel: 3, kind: 'OUTSIDE' }, // Hativa
-  { unitLevel: 3, kind: 'INSIDE' },
-  { unitLevel: 3, kind: 'OUTSIDE' },
-  { unitLevel: 3, kind: 'INSIDE' },
-  { unitLevel: 4, kind: 'OUTSIDE' }, // Gdud
-  { unitLevel: 4, kind: 'INSIDE' },
-  { unitLevel: 4, kind: 'OUTSIDE' },
-  { unitLevel: 4, kind: 'INSIDE' },
-  { unitLevel: 4, kind: 'OUTSIDE' },
-  { unitLevel: 4, kind: 'INSIDE' },
+  // ── 10 × HORIZONTAL (sibling-parent swap, same parent level) ─────────────
+  { unitLevel: 4, kind: 'HORIZONTAL' }, // Gdud → another Hativa (×4)
+  { unitLevel: 4, kind: 'HORIZONTAL' },
+  { unitLevel: 4, kind: 'HORIZONTAL' },
+  { unitLevel: 4, kind: 'HORIZONTAL' },
+  { unitLevel: 3, kind: 'HORIZONTAL' }, // Hativa → another Ugda (×3)
+  { unitLevel: 3, kind: 'HORIZONTAL' },
+  { unitLevel: 3, kind: 'HORIZONTAL' },
+  { unitLevel: 2, kind: 'HORIZONTAL' }, // Ugda → another Pikud (×3)
+  { unitLevel: 2, kind: 'HORIZONTAL' },
+  { unitLevel: 2, kind: 'HORIZONTAL' },
+
+  // ── 4 × NO_OP (idempotency: one per entity level) ────────────────────────
+  { unitLevel: 1, kind: 'NO_OP' }, // Pikud
+  { unitLevel: 2, kind: 'NO_OP' }, // Ugda
+  { unitLevel: 3, kind: 'NO_OP' }, // Hativa
+  { unitLevel: 4, kind: 'NO_OP' }, // Gdud
+
+  // ── 6 × TO_ROOT (re-parent under Matkal) ─────────────────────────────────
+  { unitLevel: 4, kind: 'TO_ROOT' }, // Gdud → Matkal (×3)
+  { unitLevel: 4, kind: 'TO_ROOT' },
+  { unitLevel: 4, kind: 'TO_ROOT' },
+  { unitLevel: 3, kind: 'TO_ROOT' }, // Hativa → Matkal (×2)
+  { unitLevel: 3, kind: 'TO_ROOT' },
+  { unitLevel: 2, kind: 'TO_ROOT' }, // Ugda → Matkal (×1)
+
+  // ── 20 × vertical level-hopping (INSIDE / OUTSIDE) ───────────────────────
+  // Gdud (level 4): 4 INSIDE + 6 OUTSIDE
+  { unitLevel: 4, kind: 'INSIDE', targetLevel: 2 }, // Gdud → ancestor Ugda
+  { unitLevel: 4, kind: 'INSIDE', targetLevel: 1 }, // Gdud → ancestor Pikud
+  { unitLevel: 4, kind: 'INSIDE', targetLevel: 2 },
+  { unitLevel: 4, kind: 'INSIDE', targetLevel: 1 },
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 3 }, // Gdud → other Hativa
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 2 }, // Gdud → other Ugda
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 1 }, // Gdud → other Pikud
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 3 },
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 2 },
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 1 },
+  // Hativa (level 3): 2 INSIDE + 4 OUTSIDE
+  { unitLevel: 3, kind: 'INSIDE', targetLevel: 1 }, // Hativa → ancestor Pikud
+  { unitLevel: 3, kind: 'INSIDE', targetLevel: 1 },
+  { unitLevel: 3, kind: 'OUTSIDE', targetLevel: 2 }, // Hativa → other Ugda
+  { unitLevel: 3, kind: 'OUTSIDE', targetLevel: 1 }, // Hativa → other Pikud
+  { unitLevel: 3, kind: 'OUTSIDE', targetLevel: 2 },
+  { unitLevel: 3, kind: 'OUTSIDE', targetLevel: 1 },
+  // Ugda (level 2): 2 OUTSIDE
+  { unitLevel: 2, kind: 'OUTSIDE', targetLevel: 1 }, // Ugda → other Pikud
+  { unitLevel: 2, kind: 'OUTSIDE', targetLevel: 1 },
+  // 2 extra cross-branch hops to round out the 20
+  { unitLevel: 4, kind: 'OUTSIDE', targetLevel: 2 },
+  { unitLevel: 3, kind: 'OUTSIDE', targetLevel: 2 },
 ];
 
 // ─── Live hierarchy fetch ───────────────────────────────────────────────────
@@ -171,6 +222,37 @@ function descendantsOf(unitId: number, idx: TreeIndex): number[] {
 function isAncestor(ancestorId: number, unitId: number, idx: TreeIndex): boolean {
   const chain = pathToRoot(unitId, idx);
   return chain.indexOf(ancestorId) >= 0 && ancestorId !== unitId;
+}
+
+// ─── Emergency-unit eligibility ─────────────────────────────────────────────
+// A unit flagged `isEmergencyUnit === false` has NO gdud breakdown beneath it,
+// so the product never exposes an editable value cell for it (its row renders
+// disabled). The value-preservation / aggregation tests set and compare cell
+// values, so they MUST NOT touch such a unit. We therefore exclude every
+// non-emergency unit from the generated data entirely — it may never appear as
+// a moved unit, a target parent, a path node (`unitsToExpand` / `newHierarchy`),
+// or a claimed unit.
+
+/**
+ * True when the backend explicitly marks the unit non-emergency
+ * (`isEmergencyUnit === false`). Read leniently: ONLY an explicit `false`
+ * excludes a unit, so a single missing/unknown flag can never wipe the tree.
+ */
+function isNonEmergencyUnit(unit: HierarchyUnit | undefined): boolean {
+  return unit?.isEmergencyUnit === false;
+}
+
+/**
+ * True when `unitId` AND its entire ancestor chain up to the root are all
+ * emergency units. Only such units may be referenced by generated data: if any
+ * ancestor were non-emergency it would land in a persisted path and the test
+ * would try to read/write a value on a value-less (disabled) unit.
+ */
+function isEmergencyEligible(unitId: number, idx: TreeIndex): boolean {
+  for (const id of pathToRoot(unitId, idx)) {
+    if (isNonEmergencyUnit(idx.byId.get(id))) return false;
+  }
+  return true;
 }
 
 // ─── Reservation (global disjoint set) ──────────────────────────────────────
@@ -409,6 +491,10 @@ function pickNextGdud(
   for (const u of idx.byId.values()) {
     if (u.level !== gdudLevel) continue;
     if (alreadyPicked.has(u.id)) continue;
+    // Skip non-emergency units (and any unit whose ancestor chain contains
+    // one): they have no gdud breakdown, so their value cells are disabled and
+    // the value-based tests can't set/read them.
+    if (!isEmergencyEligible(u.id, idx)) continue;
     const claim = regularClaim(u.id, idx);
     if (!reservations.isDisjoint(claim)) continue;
     const expandPath = topDownPath(u.id, idx);
@@ -577,15 +663,86 @@ class UF {
   }
 }
 
+// ─── Write-set model (MUST mirror the consumer's clustering) ────────────────
+// The test runner clusters entries with `groupByWriteSetComponents`
+// (src/fixtures/parallelGroups.ts). Two entries are forced into the SAME
+// serial cluster when either:
+//   (a) their `claimedUnits` write-sets overlap, OR
+//   (b) both mutate the system root's child set (move to/from Matkal=1) — all
+//       such entries are fused via a shared ROOT_MUTATION_TOKEN.
+//
+// For the builder's parallelism scoring to be MEANINGFUL it must minimise the
+// SAME fusion the consumer will later apply. So the picker keys its Union-Find
+// on this identical write-set + root token, instead of the weaker
+// `oldPath ∪ newPath` it used before.
+
+/** Sentinel UF key shared by every root-child mutator. Real ids are positive,
+ *  so a negative sentinel can never collide. Matches the consumer's token. */
+const ROOT_MUTATION_TOKEN = -1;
+
+/**
+ * Full backend write-set for a move — IDENTICAL to the `claimedUnits` that
+ * `buildChangeEntry` persists: the moved unit, its ENTIRE descendant subtree,
+ * and BOTH the old- and new-parent chains. The system root (Matkal) is
+ * excluded (every chain terminates there; including it would fuse everything).
+ */
+function writeSetOf(
+  unitToMove: number,
+  oldParent: number,
+  newParent: number,
+  idx: TreeIndex
+): number[] {
+  const set = new Set<number>([
+    unitToMove,
+    ...descendantsOf(unitToMove, idx),
+    ...pathToRoot(oldParent, idx),
+    ...pathToRoot(newParent, idx),
+  ]);
+  set.delete(ROOT_UNIT_ID);
+  return [...set];
+}
+
+/**
+ * Union-Find keys for a move: its full write-set, PLUS the shared root token
+ * when the move adds or removes a top-level (root-child) unit. This is exactly
+ * what the consumer's `groupByWriteSetComponents` keys on, so the builder's
+ * cluster-minimisation now optimises the real run's parallelism.
+ */
+function ufKeysOf(
+  unitToMove: number,
+  oldParent: number,
+  newParent: number,
+  idx: TreeIndex
+): number[] {
+  const keys = writeSetOf(unitToMove, oldParent, newParent, idx);
+  if (oldParent === ROOT_UNIT_ID || newParent === ROOT_UNIT_ID) {
+    keys.push(ROOT_MUTATION_TOKEN);
+  }
+  return keys;
+}
+
 /**
  * Find a (unitToMove, newParent) pair satisfying:
  *   • unitToMove.level === slot.unitLevel
- *   • newParent.level < unitToMove.level
- *   • newParent !== current parent
  *   • newParent is not a descendant of unitToMove (no cycles)
- *   • INSIDE  → newParent is on unitToMove's current ancestor chain
- *     OUTSIDE → newParent is NOT on unitToMove's current ancestor chain
+ *   • the per-kind placement rule (see below)
  *   • the resulting claim is disjoint from existing reservations.
+ *
+ * Per-kind placement rules:
+ *   INSIDE     → newParent.level < unitToMove.level AND newParent !== current
+ *                parent AND newParent IS on unitToMove's ancestor chain.
+ *   OUTSIDE    → newParent.level < unitToMove.level AND newParent !== current
+ *                parent AND newParent is NOT on the ancestor chain.
+ *   HORIZONTAL → newParent.level === currentParent.level AND
+ *                newParent.id !== currentParent.id (sibling-parent swap).
+ *   NO_OP      → newParent.id === currentParent.id (idempotency probe);
+ *                the unique-parent guard is intentionally bypassed.
+ *   TO_ROOT    → newParent.level === 0 (Matkal).
+ *   When slot.targetLevel is set, newParent.level must equal it (ignored for
+ *   NO_OP / TO_ROOT, whose target level is implied by the rule itself).
+ *
+ * Parallelism guard: every variant still strictly respects the global
+ * `reservations` + `paths` logic, so parallel test runs never collide.
  *
  * Scoring (lower = better):
  *   1. mergedComponents — how many existing parallel-clusters this entry
@@ -620,25 +777,73 @@ function pickChangeMove(
     if (unit.level !== slot.unitLevel) continue;
     const oldParent = (unit.parent as { id: number } | null | undefined)?.id;
     if (oldParent == null) continue;
+    // The moved unit (and its whole ancestor chain → its `unitsToExpand`
+    // path) must be all-emergency. A non-emergency unit has no gdud
+    // breakdown, so its value cell renders disabled and the value-based
+    // tests can't set/read it.
+    if (!isEmergencyEligible(unit.id, idx)) continue;
 
     const ancestorChain = pathToRoot(unit.id, idx); // top-down inc. self
     const ancestorsOnly = new Set(ancestorChain.slice(0, -1)); // exclude self
+    const oldParentLevel = idx.byId.get(oldParent)?.level;
 
     for (const cand of idx.byId.values()) {
-      if (cand.level >= unit.level) continue;
-      if (cand.id === oldParent) continue;
       if (cand.id === unit.id) continue;
-      if (isAncestor(unit.id, cand.id, idx)) continue; // cycle guard
+      if (isAncestor(unit.id, cand.id, idx)) continue; // cycle guard (always on)
+      // The new parent (and its ancestor chain → the `newHierarchy` path)
+      // must likewise be all-emergency, so the relocated unit lands under a
+      // value-bearing branch.
+      if (!isEmergencyEligible(cand.id, idx)) continue;
 
+      // ── Per-kind placement rules ─────────────────────────────────────────
+      // The legacy baseline guards (`cand.level < unit.level` and
+      // `cand.id !== oldParent`) only hold for the vertical kinds; the new
+      // kinds relax or invert them as documented above.
       const onAncestorChain = ancestorsOnly.has(cand.id);
-      if (slot.kind === 'INSIDE' && !onAncestorChain) continue;
-      if (slot.kind === 'OUTSIDE' && onAncestorChain) continue;
+      switch (slot.kind) {
+        case 'INSIDE':
+          if (cand.level >= unit.level) continue; // upward only
+          if (cand.id === oldParent) continue; // must actually move
+          if (!onAncestorChain) continue; // stay on own lineage
+          break;
+        case 'OUTSIDE':
+          if (cand.level >= unit.level) continue; // upward only
+          if (cand.id === oldParent) continue; // must actually move
+          if (onAncestorChain) continue; // cross-branch only
+          break;
+        case 'HORIZONTAL':
+          if (oldParentLevel == null) continue;
+          if (cand.level !== oldParentLevel) continue; // same parent level
+          if (cand.id === oldParent) continue; // different parent node
+          break;
+        case 'NO_OP':
+          // Idempotency probe: force the unit's CURRENT parent. The unique
+          // parent guard is intentionally bypassed (we WANT cand === oldParent).
+          if (cand.id !== oldParent) continue;
+          break;
+        case 'TO_ROOT':
+          if (cand.level !== 0) continue; // target Matkal directly
+          break;
+      }
 
-      // newParent must not be a unit that is itself being moved by another
-      // entry (would mean parenting under something in flux). Backend
-      // guarantees same-newParent and same-oldParent races are safe, so we
-      // do NOT block on those.
-      if (reservations.claimed.has(cand.id)) continue;
+      // Optional explicit target-level constraint (applies to the kinds that
+      // can vary their destination level; NO_OP / TO_ROOT fix it implicitly).
+      if (
+        slot.targetLevel != null &&
+        slot.kind !== 'NO_OP' &&
+        slot.kind !== 'TO_ROOT' &&
+        cand.level !== slot.targetLevel
+      ) {
+        continue;
+      }
+
+      // Parallelism guard: newParent must not be a unit that is itself being
+      // moved by another entry (parenting under something in flux). NO_OP is
+      // exempt — its "newParent" is the unit's own current parent, which the
+      // backend's per-child write model already makes race-safe. Backend
+      // guarantees same-newParent and same-oldParent races are safe, so we do
+      // NOT block on those.
+      if (slot.kind !== 'NO_OP' && reservations.claimed.has(cand.id)) continue;
 
       const claim = changeClaim(unit.id, cand.id, idx);
       if (!reservations.isDisjoint(claim)) continue;
@@ -652,8 +857,13 @@ function pickChangeMove(
       if (paths.conflictsWithChange(unit.id, [oldPath, newPath])) continue;
 
       // ── Score 1: how many existing parallel-clusters this entry would
-      // fuse. The aim is to keep clusters small and numerous.
-      const touched = new Set<number>([...oldPath, ...newPath]);
+      // fuse. The aim is to keep clusters small and numerous. We inspect the
+      // FULL write-set + root token (exactly what the consumer fuses on), not
+      // just the explicit paths — otherwise the builder would minimise a
+      // weaker overlap than the one that actually serialises tests at run time.
+      const touched = new Set<number>(
+        ufKeysOf(unit.id, oldParent, cand.id, idx)
+      );
       const { roots, totalSize } = uf.inspect(touched);
 
       // ── Score 2: legacy top-Pikud spread (kept as a secondary signal).
@@ -696,7 +906,9 @@ function pickChangeMove(
   paths.commitChange(pick.unit.id, [pick.oldPath, pick.newPath]);
   topUsage.set(pick.oldPath[0], (topUsage.get(pick.oldPath[0]) ?? 0) + 1);
   topUsage.set(pick.newPath[0], (topUsage.get(pick.newPath[0]) ?? 0) + 1);
-  uf.commit([...new Set<number>([...pick.oldPath, ...pick.newPath])]);
+  // Commit the SAME write-set + root token the consumer will fuse on, so the
+  // next pick's `mergedComponents` score reflects the real run-time clustering.
+  uf.commit(ufKeysOf(pick.unit.id, pick.oldParent, pick.cand.id, idx));
 
   return {
     unitToMove: pick.unit.id,
@@ -755,6 +967,81 @@ function buildChangeEntry(
   };
 }
 
+/** Count how many live units exist at each level (for pre-flight guardrails). */
+function countUnitsByLevel(idx: TreeIndex): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const u of idx.byId.values()) {
+    if (typeof u.level === 'number') {
+      // Only emergency-eligible units can ever be selected, so the pre-flight
+      // feasibility check must count from that same pool — otherwise it could
+      // green-light a slot the picker then silently skips for lack of an
+      // emergency candidate.
+      if (!isEmergencyEligible(u.id, idx)) continue;
+      counts.set(u.level, (counts.get(u.level) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
+ * Pre-flight structural feasibility check for a single slot against the LIVE
+ * tree, independent of reservation pressure. Throws a descriptive error if the
+ * backend hierarchy simply can't host the slot's movement shape — e.g. a
+ * HORIZONTAL move needs ≥2 distinct same-level parents, so a tree with a single
+ * Pikud can't host a horizontal Ugda swap.
+ *
+ * (Running OUT of nodes mid-build due to reservations is a separate, softer
+ * condition handled by the per-slot skip in the generation loop.)
+ */
+function assertSlotFeasible(
+  slot: SlotSpec,
+  index: number,
+  counts: Map<number, number>
+): void {
+  const at = (lvl: number): number => counts.get(lvl) ?? 0;
+  const fail = (entityLevel: number): never => {
+    const entity = LEVEL_LABEL[entityLevel] ?? `L${entityLevel}`;
+    throw new Error(
+      `Data Generation Failed: Insufficient live seed data to satisfy slot ${index}. ` +
+        `Missing unique ${entity} nodes.`
+    );
+  };
+
+  // Every slot needs at least one unit at its own level to move.
+  if (at(slot.unitLevel) < 1) fail(slot.unitLevel);
+
+  switch (slot.kind) {
+    case 'HORIZONTAL': {
+      // Need ≥2 distinct parents at the parent level (L-1) to swap between.
+      const parentLevel = slot.unitLevel - 1;
+      if (at(parentLevel) < 2) fail(parentLevel);
+      break;
+    }
+    case 'OUTSIDE': {
+      // Need ≥2 nodes at the destination level so at least one is OFF the
+      // unit's own ancestor chain (a genuine cross-branch target).
+      const target = slot.targetLevel ?? slot.unitLevel - 1;
+      if (at(target) < 2) fail(target);
+      break;
+    }
+    case 'INSIDE': {
+      // Need the ancestor destination level to exist above the unit.
+      const target = slot.targetLevel ?? slot.unitLevel - 1;
+      if (at(target) < 1) fail(target);
+      break;
+    }
+    case 'TO_ROOT': {
+      // Need the Matkal root (level 0) present as a destination.
+      if (at(0) < 1) fail(0);
+      break;
+    }
+    case 'NO_OP':
+      // Only needs the unit itself (already checked); its current parent is
+      // guaranteed to exist for any non-root node.
+      break;
+  }
+}
+
 function runHierarchyChange(
   idx: TreeIndex,
   reservations: Reservations,
@@ -790,6 +1077,15 @@ function runHierarchyChange(
     for (const u of paths.pathUnits) uf.ensure(u);
   }
 
+  // ── Pre-flight data guardrail ────────────────────────────────────────────
+  // Validate the LIVE tree can structurally host every slot in the 40-slot
+  // matrix BEFORE generating anything. Fails fast with a descriptive error if
+  // the seed hierarchy lacks enough unique entities/branches for a slot.
+  const levelCounts = countUnitsByLevel(idx);
+  for (let i = 0; i < HC_SLOT_PATTERN.length; i++) {
+    assertSlotFeasible(HC_SLOT_PATTERN[i], i, levelCounts);
+  }
+
   for (const [arrayKey, arrVal] of Object.entries(template)) {
     if (!Array.isArray(arrVal) || arrVal.length === 0) {
       output[arrayKey] = arrVal;
@@ -798,7 +1094,24 @@ function runHierarchyChange(
     const tmplEntry = arrVal[0] as ChangeTemplateEntry;
     const generated: Record<string, unknown>[] = [];
 
-    for (let i = 0; i < HC_SLOT_PATTERN.length; i++) {
+    // ── Slot processing order: ROOT MOVES FIRST ──────────────────────────────
+    // All TO_ROOT (and any other root-child) moves are fused into ONE serial
+    // cluster by the consumer regardless of what else we pick. By committing
+    // their full write-sets to the UF *before* the other 34 slots, the
+    // `mergedComponents` score then actively steers every later pick AWAY from
+    // the root moves' subtrees — so the ~62 non-root entries stay in small,
+    // independent (parallel) clusters instead of being dragged into the root
+    // blob. Output is still emitted in the original slot order for readability.
+    const order = HC_SLOT_PATTERN.map((_, i) => i).sort((a, b) => {
+      const ra = HC_SLOT_PATTERN[a].kind === 'TO_ROOT' ? 0 : 1;
+      const rb = HC_SLOT_PATTERN[b].kind === 'TO_ROOT' ? 0 : 1;
+      return ra !== rb ? ra - rb : a - b;
+    });
+    const bySlot: (Record<string, unknown> | null)[] = HC_SLOT_PATTERN.map(
+      () => null
+    );
+
+    for (const i of order) {
       const slot = HC_SLOT_PATTERN[i];
       const move = pickChangeMove(slot, idx, reservations, paths, topUsage, uf);
       if (!move) {
@@ -808,9 +1121,11 @@ function runHierarchyChange(
         totalSkipped += 1;
         continue;
       }
-      generated.push(buildChangeEntry(tmplEntry, move, idx, matSeq));
+      bySlot[i] = buildChangeEntry(tmplEntry, move, idx, matSeq);
       totalGenerated += 1;
     }
+    // Emit in original slot order, dropping skipped slots.
+    for (const entry of bySlot) if (entry) generated.push(entry);
     output[arrayKey] = generated;
     console.log(
       `[data-builder]   ${arrayKey}: ${generated.length}/${HC_SLOT_PATTERN.length} entries.`
@@ -884,7 +1199,7 @@ async function main(): Promise<void> {
     case '':
       // REGULAR is cheap (8 entries × short chains) and entirely read-only,
       // so let it grab a few small disjoint chains first. HC then fills
-      // around the reservations, packing the remaining 36 slots into the
+      // around the reservations, packing the 40-slot matrix into the
       // (still large) unclaimed portion of the tree.
       runRegular(idx, reservations, paths, matSeq);
       runHierarchyChange(idx, reservations, paths, matSeq);

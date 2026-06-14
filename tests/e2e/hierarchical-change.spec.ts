@@ -170,6 +170,115 @@ async function handleRootOldParent(
   return true;
 }
 
+// ─── Resilient "set values + save" (recovers from the top-level-set 502) ─────
+//
+// ROOT CAUSE: every flow saves/locks under
+// screen-unit Matkal (root=1), and `reportUnits` sends the ENTIRE live
+// top-level set as `lowerUnitsIds`. When ANOTHER worker moves a unit in/out of
+// Matkal, that global set changes; any in-flight save under Matkal is then
+// rejected with HTTP 502 + "ההיררכיה תחתיך השתנתה" ("the hierarchy beneath you
+// changed — refresh the screen"). The clusterer cannot prevent this without
+// serializing every root-mutator against the WHOLE suite (which would destroy
+// parallelism), so we instead make the victim operation resilient — exactly as
+// `lockCompleteHierarchy` already retries this same message at the API layer.
+//
+// The save is fully recoverable: the rejected write persisted NOTHING, so a
+// page reload re-fetches the now-consistent hierarchy, after which we replay
+// the identical re-add → re-expand (SAME full path) → re-set values → save.
+
+/** Backend marker for "the hierarchy below you changed — please refresh". */
+const HIERARCHY_CHANGED_502 = 'ההיררכיה תחתיך השתנתה';
+
+/**
+ * True only for the transient top-level-set-change rejection (the Hebrew
+ * marker, or an explicit 502 from the save endpoint). Any other failure
+ * (4xx bad data, locked unit, genuine 5xx bug) returns false so it surfaces
+ * immediately instead of being masked by a retry.
+ */
+function isHierarchyChanged502(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    msg.includes(HIERARCHY_CHANGED_502) ||
+    /→\s*502\b/.test(msg) ||
+    /\b502 Bad Gateway\b/.test(msg)
+  );
+}
+
+/**
+ * Run `setLeafCellValues` → (optional capture BEFORE) → `saveMaterial`, with
+ * automatic recovery from the {@link HIERARCHY_CHANGED_502} save rejection.
+ *
+ * On that specific 502 the lost write is replayed: reload (re-fetches the
+ * now-consistent hierarchy), re-add the makat, re-expand the SAME full path
+ * (idempotent — the path already includes the freestyle suffix, and
+ * re-expanding a complete path appends nothing), then loop. Up to
+ * `MAX_SAVE_ATTEMPTS` total attempts.
+ *
+ * Assumes the caller has ALREADY added the makat and expanded `fullPath` once
+ * (so attempt 1 needs no setup); only retries perform the reload + re-expand.
+ *
+ * @param fullPath       the COMPLETE expanded path (`unitsToExpand` after the
+ *                       caller's `expandHierarchyToLeaf`, incl. freestyle suffix).
+ * @param captureBefore  when true, returns the BEFORE-move value snapshot from
+ *                       the successful attempt; otherwise returns undefined.
+ */
+async function setValuesAndSaveResilient(
+  hierarchyPage: ShechelPage,
+  ctx: Record<string, unknown>,
+  makatId: string,
+  fullPath: number[],
+  captureBefore: boolean,
+): Promise<Map<number, number> | undefined> {
+  const MAX_SAVE_ATTEMPTS = 3;
+
+  for (let attempt = 1; attempt <= MAX_SAVE_ATTEMPTS; attempt++) {
+    await withPhase('Set leaf cell values', ctx, () =>
+      hierarchyPage.setLeafCellValues(makatId, fullPath, 1),
+    );
+
+    const captured = captureBefore
+      ? await withPhase('Capture values BEFORE move', ctx, () =>
+          hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, fullPath),
+        )
+      : undefined;
+
+    try {
+      await withPhase(
+        `Save material BEFORE move (attempt ${attempt}/${MAX_SAVE_ATTEMPTS})`,
+        ctx,
+        () => hierarchyPage.saveMaterial(),
+      );
+      return captured;
+    } catch (err) {
+      // Only the transient top-level-set-change 502 is recoverable; anything
+      // else is a real failure and must propagate untouched.
+      if (attempt >= MAX_SAVE_ATTEMPTS || !isHierarchyChanged502(err)) throw err;
+
+      console.warn(
+        `[RESILIENT SAVE] "Save material BEFORE move" hit the transient ` +
+          `"hierarchy changed beneath you" 502 (attempt ${attempt}/${MAX_SAVE_ATTEMPTS}). ` +
+          `Another worker mutated Matkal's top-level set mid-save. Reloading, re-adding ` +
+          `makat ${makatId}, re-expanding [${fullPath.join(' → ')}], and replaying the save.`,
+      );
+
+      await withPhase(`Recover from save 502 (attempt ${attempt})`, ctx, async () => {
+        await hierarchyPage.page.reload();
+        await hierarchyPage.waitForMakatComboboxReady(30_000);
+        await hierarchyPage.addMakatFromDropdown(makatId);
+        await hierarchyPage.waitForMaterialRow(makatId, 15_000);
+        // Re-expand the SAME complete path. Because `fullPath` already ends at
+        // a real leaf, `expandHierarchyToLeaf` re-opens exactly it and appends
+        // no new freestyle units (keeping any caller-computed suffix valid).
+        await hierarchyPage.expandHierarchyToLeaf(makatId, fullPath);
+      });
+    }
+  }
+
+  // Unreachable: the loop always returns on success or throws on the final
+  // attempt. Present only to satisfy the type checker.
+  return undefined;
+}
+
 async function runValuePreservation(
   hierarchyPage: ShechelPage,
   request: APIRequestContext,
@@ -217,18 +326,17 @@ async function runValuePreservation(
     )}])`,
   );
 
-  await withPhase('Set leaf cell values', ctx, () =>
-    hierarchyPage.setLeafCellValues(makatId, originalHierarchy, 1),
-  );
-  const valuesBefore = await withPhase('Capture values BEFORE move', ctx, () =>
-    hierarchyPage.captureAllVisibleCellValuesAtEachLevel(
-      makatId,
-      originalHierarchy,
-    ),
-  );
-  await withPhase('Save material BEFORE move', ctx, () =>
-    hierarchyPage.saveMaterial(),
-  );
+  // Set values + capture BEFORE + save, with built-in recovery from the
+  // transient top-level-set-change 502 ("hierarchy beneath you changed").
+  // `originalHierarchy` is the FULL path here (already expanded above,
+  // including any freestyle suffix), so retries replay it verbatim.
+  const valuesBefore = (await setValuesAndSaveResilient(
+    hierarchyPage,
+    ctx,
+    makatId,
+    originalHierarchy,
+    true,
+  ))!;
 
   await withPhase('Unlock complete hierarchy (API)', ctx, () =>
     unlockCompleteHierarchy(request, originalHierarchy, newHierarchy),
@@ -401,11 +509,16 @@ async function runAggregation(
     )}] (full original path: [${originalHierarchy.join(' → ')}])`,
   );
 
-  await withPhase('Set leaf cell values', ctx, () =>
-    hierarchyPage.setLeafCellValues(makatId, originalHierarchy, 1),
-  );
-  await withPhase('Save material BEFORE move', ctx, () =>
-    hierarchyPage.saveMaterial(),
+  // Set values + save, with built-in recovery from the transient
+  // top-level-set-change 502 ("hierarchy beneath you changed"). No BEFORE
+  // snapshot is needed here — the aggregation flow re-reads values after the
+  // move — so `captureBefore` is false.
+  await setValuesAndSaveResilient(
+    hierarchyPage,
+    ctx,
+    makatId,
+    originalHierarchy,
+    false,
   );
 
   await withPhase('Unlock complete hierarchy (API)', ctx, () =>
@@ -506,11 +619,16 @@ async function runOldHierarchyAggregation(
   await withPhase('Expand original hierarchy', ctx, () =>
     hierarchyPage.expandHierarchyToLeaf(makatId, originalHierarchy),
   );
-  await withPhase('Set leaf cell values', ctx, () =>
-    hierarchyPage.setLeafCellValues(makatId, originalHierarchy, 1),
-  );
-  await withPhase('Save material BEFORE move', ctx, () =>
-    hierarchyPage.saveMaterial(),
+  // Set values + save, with built-in recovery from the transient
+  // top-level-set-change 502 ("hierarchy beneath you changed"). The OLD-
+  // hierarchy flow re-reads values after the move, so no BEFORE snapshot is
+  // needed here (`captureBefore` is false).
+  await setValuesAndSaveResilient(
+    hierarchyPage,
+    ctx,
+    makatId,
+    originalHierarchy,
+    false,
   );
 
   await withPhase('Unlock complete hierarchy (API)', ctx, () =>
