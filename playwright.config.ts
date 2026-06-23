@@ -28,10 +28,29 @@ export default defineConfig({
   // Worker count is bounded by the LARGEST serial cluster: wall-time can't go
   // below the biggest `describe.serial` block (it runs on one worker). After
   // the write-set-aware data-builder change, the hierarchy-change suite peaks
-  // at ~26 tests in its largest cluster spread over ~12 clusters, so 5 local
-  // workers saturate the available parallelism; more would sit idle.
+  // at ~26 tests in its largest cluster spread over ~12 clusters.
+  //
+  // Capped at 3 locally: the hierarchy carousel is a SHARED UI resource that
+  // renders every locked top unit across ALL workers. Too many parallel locks
+  // bloat the carousel and push a test's target unit deep into pagination,
+  // causing flaky BEFORE-capture timeouts on a loaded backend. 3 keeps the
+  // carousel small enough to stay reliable while preserving useful parallelism.
+  //
+  // Lowered to 2 (from 3): at 3 workers a burst of concurrent heavy flows
+  // (makat-add + carousel hierarchy fetch + lock/save) periodically overloaded
+  // the backend, which surfaced as `[role="combobox"]` 30s timeouts and
+  // "top unit never appeared on the carousel" (the freshly-locked unit was
+  // missing from the carousel's hierarchy fetch entirely → "next gone after 0
+  // clicks"). Those races caused both the flaky smoke retries and the
+  // irreversible-move hard failures. 2 workers keeps the backend responsive
+  // enough that the carousel and combobox render first time, while still
+  // running clusters in parallel. Override with WORKERS env when needed.
   fullyParallel: true,
-  workers: process.env.CI ? 2 : 5,
+  workers: process.env.WORKERS
+    ? Number(process.env.WORKERS)
+    : process.env.CI
+      ? 2
+      : 2,
 
   // Allow one retry to absorb transient UI hiccups (component remounts after
   // data fetches, network idle bouncing, etc.). CI gets a second retry.

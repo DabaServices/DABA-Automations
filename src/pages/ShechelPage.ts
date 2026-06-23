@@ -6,6 +6,7 @@ import {
   describeResponseFailure,
 } from '../utils/httpFailures';
 import { BACKEND_URL } from '../../playwright.config';
+import { lockCompleteHierarchy, invalidateTopLevelUnitsCache } from '../api/apiHelpers';
 
 /**
  * Host portion of the configured backend (e.g. "localhost:3000" or
@@ -385,7 +386,27 @@ export class ShechelPage extends MainPage {
           console.info(
             `[expandHierarchyToLeaf] Unit ${unitId} not in DOM — clicking carousel "next" arrow until it appears or arrow is gone…`,
           );
-          await this.revealUnitInCarousel(materialId, unitId);
+          // Bound the ENTIRE first-hop recovery (pagination + reload retries)
+          // to a wall-clock budget. On a slow/unstable backend the reveal +
+          // reload loop could otherwise grind until the 270s test timeout,
+          // which tears the page down mid-click and surfaces as a confusing
+          // "Target page, context or browser has been closed" instead of an
+          // actionable message.
+          //
+          // Size it for the WORST case: the carousel lists up to ~70 locked
+          // top-level units and a target can sit at the far right (index ~47+
+          // observed for units 200/216/354). Each "next" page-swap waits out
+          // the loading overlay (~1s on a slow backend), so reaching the far
+          // end alone can take ~60s — a 30s budget aborted those reveals early
+          // and the moved unit's gdud was never expanded, surfacing as
+          // "before-capture-incomplete". Give pagination room to traverse the
+          // whole list while still leaving the OUTER per-phase retry (the
+          // BEFORE-phase loop reloads + re-expands up to 3×) comfortably under
+          // the 300s per-test budget.
+          const FIRST_HOP_BUDGET_MS = 90_000;
+          const firstHopDeadline = Date.now() + FIRST_HOP_BUDGET_MS;
+
+          await this.revealUnitInCarousel(materialId, unitId, 80, firstHopDeadline);
           cell = this.rowCell(materialId, unitId);
 
           // First-hop recovery (carousel render-race).
@@ -406,14 +427,46 @@ export class ShechelPage extends MainPage {
           // reload loses nothing. We deliberately keep this scoped to the
           // FIRST hop (a top-level unit); deeper units are never revealed by
           // carousel pagination and must come from a network-button expand.
-          const FIRST_HOP_RELOADS = 2;
-          for (let r = 0; r < FIRST_HOP_RELOADS && !(await cell.count()); r++) {
+          //
+          // 3 reloads (was 2): now that each recovery first RE-ASSERTS the lock
+          // via API (below), the extra attempt is high-value — it gives the
+          // backend one more chance to reflect the guaranteed-locked top on the
+          // carousel under transient load, rather than giving up one round early.
+          const FIRST_HOP_RELOADS = 3;
+          for (
+            let r = 0;
+            r < FIRST_HOP_RELOADS &&
+            !(await cell.count()) &&
+            Date.now() < firstHopDeadline;
+            r++
+          ) {
             console.warn(
               `[expandHierarchyToLeaf] Top unit ${unitId} not on carousel after pagination — ` +
                 `reloading to re-fetch the hierarchy and re-revealing (attempt ${r + 1}/${FIRST_HOP_RELOADS}). ` +
                 `This recovers a locked top unit that dropped off the carousel when the makat was added.`,
             );
             try {
+              // ROOT-CAUSE recovery (carousel "next gone after 0 clicks").
+              // The carousel renders ONLY locked top units and builds its list
+              // from a hierarchy fetch on load. Two things make a freshly-locked
+              // top vanish from that list under a loaded backend:
+              //   (a) the lock didn't actually persist, or
+              //   (b) the carousel's fetch raced the lock and a plain reload
+              //       re-raced it (so 2 reloads in a row both miss it).
+              // A plain reload only addresses (b) probabilistically. Re-ASSERT
+              // the lock via API first (idempotent — fixes (a) and guarantees
+              // the top is genuinely locked before we reload), and invalidate
+              // the cached top-level set so the next fetch reflects reality.
+              // This converts the "0 clicks, never appears" flake into a
+              // deterministic recovery instead of a coin-flip on backend load.
+              try {
+                invalidateTopLevelUnitsCache();
+                await lockCompleteHierarchy(this.page.request, [unitId]);
+              } catch (relockErr) {
+                console.warn(
+                  `[expandHierarchyToLeaf] First-hop re-lock of ${unitId} failed (continuing to reload anyway): ${String(relockErr).slice(0, 120)}`,
+                );
+              }
               await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 30_000 });
               await this.waitForMakatComboboxReady(30_000);
               // Re-add the makat row dropped by the reload (idempotent — the
@@ -422,13 +475,31 @@ export class ShechelPage extends MainPage {
               await this.waitForMaterialRow(materialId, 15_000);
               await this.waitForAmmoLoadingGone();
               await this.resetCarouselToLeftmost().catch(() => undefined);
-              await this.revealUnitInCarousel(materialId, unitId);
+              await this.revealUnitInCarousel(materialId, unitId, 80, firstHopDeadline);
               cell = this.rowCell(materialId, unitId);
             } catch (e) {
               console.warn(
                 `[expandHierarchyToLeaf] First-hop reload recovery attempt ${r + 1} failed: ${e}`,
               );
             }
+          }
+
+          // If the locked top unit STILL never surfaced on the carousel within
+          // the budget, do NOT keep grinding — break out and let the normal
+          // "no cell found" path below stop this expand cleanly. Callers that
+          // require the cell (BEFORE/AFTER capture phases) detect the missing
+          // unit in their snapshot and run their own bounded reload-retry with
+          // a precise, actionable assertion; surfacing here as a fast, logged
+          // miss is far better than running out the full test timeout and dying
+          // with an opaque "page closed" error.
+          if (!(await cell.count())) {
+            console.warn(
+              `[expandHierarchyToLeaf] Top-level unit ${unitId} never appeared on the ` +
+                `carousel within ${FIRST_HOP_BUDGET_MS / 1000}s (pagination + ${FIRST_HOP_RELOADS} ` +
+                `reload recoveries). It is in the live top-level set but its carousel column did ` +
+                `not render — typically a slow/unstable backend. Stopping this expand early; the ` +
+                `caller's capture-retry will handle recovery or report it precisely.`,
+            );
           }
         }
       }
@@ -498,7 +569,38 @@ export class ShechelPage extends MainPage {
       }
 
       console.info(`[expandHierarchyToLeaf] Clicking network button for unit ${unitId} (step ${i + 1}/${unitsToExpand.length})`);
-      await networkBtn.click();
+      // The grid frequently re-renders while the row hydrates, detaching the
+      // network-button SVG mid-click ("element was detached from the DOM").
+      // Under a loaded backend that detach+reattach can outlast a single
+      // click's auto-retry window and surface as a hard timeout (the unit-478
+      // OUTSIDE failure). Retry the click a few times, re-resolving the button
+      // and settling the loading overlay between attempts, so a transient
+      // re-render no longer fails the whole (irreversible) flow.
+      const NET_CLICK_ATTEMPTS = 3;
+      let clicked = false;
+      for (let c = 0; c < NET_CLICK_ATTEMPTS; c++) {
+        try {
+          await this.networkButton(materialId, unitId).click({ timeout: 5_000 });
+          clicked = true;
+          break;
+        } catch (e) {
+          if (c === NET_CLICK_ATTEMPTS - 1) {
+            console.warn(
+              `[expandHierarchyToLeaf] Network button click for unit ${unitId} failed after ` +
+                `${NET_CLICK_ATTEMPTS} attempts (${String(e).slice(0, 100)}) — stopping this expand.`,
+            );
+            break;
+          }
+          // Re-resolve and let the grid settle before retrying — the prior
+          // handle is stale after the re-render that detached it.
+          await this.waitForAmmoLoadingGone();
+          await this.networkButton(materialId, unitId)
+            .first()
+            .waitFor({ state: 'visible', timeout: 3_000 })
+            .catch(() => undefined);
+        }
+      }
+      if (!clicked) break;
       expanded = true;
 
       // Wait for the next level to render (look for either kind of cell)
@@ -1028,9 +1130,47 @@ export class ShechelPage extends MainPage {
     // Some backend filter responses are slow / the dropdown may render the
     // item with a delay. Retry the type-and-pick cycle up to 3 times before
     // giving up — clearing the input between attempts so the filter re-runs.
+    //
+    // IMPORTANT: a LOCKED destination parent renders in the drawer (its
+    // accordion is visible) but NEVER exposes its combobox input — locked
+    // nodes are not editable. Previously this loop would just time out on the
+    // missing input and fail with a generic message. We now, on each attempt,
+    // (re)expand the parent's accordion and explicitly detect the
+    // locked-but-no-input case so the caller can recover (re-unlock + reload).
     let picked = false;
     for (let attempt = 1; attempt <= 3 && !picked; attempt++) {
       try {
+        // Re-expand the target parent's accordion each attempt. A reload during
+        // a recovery collapses it again, and a freshly-unlocked node may need a
+        // second expand before its combobox mounts.
+        const accordion = this.accordionTrigger(newParentId);
+        if (await accordion.isVisible({ timeout: 1000 }).catch(() => false)) {
+          const inputAlreadyThere = await comboboxInput
+            .isVisible({ timeout: 500 })
+            .catch(() => false);
+          if (!inputAlreadyThere) {
+            await accordion.click().catch(() => {});
+            await this.page.waitForTimeout(200);
+          }
+        }
+
+        // If the node is present but its input never mounts, it is LOCKED.
+        // Surface that precise cause immediately so the caller re-unlocks
+        // instead of burning the full retry budget on a generic timeout.
+        const inputVisible = await comboboxInput
+          .isVisible({ timeout: 4_000 })
+          .catch(() => false);
+        if (!inputVisible) {
+          const nodePresent = await this.accordionTrigger(newParentId)
+            .isVisible({ timeout: 500 })
+            .catch(() => false);
+          throw new Error(
+            nodePresent
+              ? `target parent ${newParentId} is present in the drawer but its combobox input never rendered — the node is LOCKED (locked nodes are not editable). Re-unlock parent ${newParentId} before retrying the move.`
+              : `target parent ${newParentId} did not render in the drawer at all (node missing).`,
+          );
+        }
+
         await comboboxInput.click();
         await this.waitForNetworkIdle();
         await comboboxInput.fill('');

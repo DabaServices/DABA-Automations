@@ -80,7 +80,40 @@ export async function reportUnits(
   const action = isLaunching ? 'Launching' : 'Reporting (pre-lock)';
   console.log(`[reportUnits] ${action} units [${unitsIds.join(', ')}]`);
 
-  const response = await request.post(url, { data: payload, headers });
+  // Retry transient network errors / timeouts so a brief backend blip or DNS
+  // hiccup doesn't fail the whole lock. We do NOT retry on a 4xx/5xx RESPONSE
+  // here — those are handled below (e.g. the caller re-fetches the live top
+  // units on the "hierarchy changed" 502). This loop only re-attempts when the
+  // POST itself THROWS (connection reset, socket hang up, Playwright timeout),
+  // which is exactly the failure that previously burned the per-test budget
+  // when the backend was briefly unreachable at start-up.
+  const maxAttempts = 4;
+  let response: any;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      response = await request.post(url, { data: payload, headers, timeout: 20_000 });
+      break;
+    } catch (e) {
+      lastError = e;
+      const msg = String((e as Error)?.message ?? e);
+      const isTransient =
+        msg.includes('ENOTFOUND') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('socket hang up') ||
+        msg.includes('Timeout') ||
+        msg.includes('exceeded');
+      if (attempt === maxAttempts || !isTransient) throw e;
+      const wait = 1000 * attempt;
+      console.warn(
+        `[reportUnits] ${action} attempt ${attempt}/${maxAttempts} network error (${msg.slice(0, 100)}); retrying in ${wait}ms…`,
+      );
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  if (!response) throw lastError;
 
   const status = response.status();
   let responseBody: any;

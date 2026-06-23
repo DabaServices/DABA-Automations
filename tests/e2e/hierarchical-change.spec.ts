@@ -7,12 +7,18 @@ import {
 } from '../../src/api/apiHelpers';
 import { updateUnitHierarchy } from '../../src/api/hierarchychange';
 import { waitForUnitParent } from '../../src/api/dynamicHierarchyDiscovery';
+import { lockUnitStatus } from '../../src/api/lockunitstatus';
 import {
   groupByWriteSetComponents,
   clusterLabelAll,
+  topUnitsOf,
 } from '../../src/fixtures/parallelGroups';
 import type { ShechelPage } from '../../src/pages/ShechelPage';
 import type { APIRequestContext } from '@playwright/test';
+// Value import (NOT `import type`) — used to build a standalone API context in
+// the per-cluster `afterAll` lock-release hook, where the test-scoped `request`
+// fixture is not available. Mirrors `scripts/data-builder.ts`.
+import { request as apiRequest } from '@playwright/test';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cross-dataset clustering.
@@ -149,13 +155,37 @@ async function handleRootOldParent(
       `(Move-out-of-root behaviour is covered by the VP/AGG flows.)`,
   );
 
+  // ── PERFORM the move-out-of-root, THEN assert it landed ───────────────────
+  // BUG FIX: this guard previously asserted `waitForUnitParent(unitToMove,
+  // newParentUnit)` WITHOUT ever performing the move. For a move-out-of-root
+  // entry no other code path relocates the unit (the main flow's
+  // `updateUnitHierarchy` is below the early `return true` this function
+  // triggers), so the unit was still under Matkal=1 and the assertion timed
+  // out every run ("last seen: 1") — a deterministic failure, not flakiness.
+  //
+  // Perform the relocation here via the SAME API sequence the VP/AGG flows use
+  // (unlock both branches → updateUnitHierarchy → re-lock the two tops), then
+  // verify it landed. `updateUnitHierarchy` invalidates the top-level-units
+  // cache internally, so the subsequent `lockCompleteHierarchy` sends the LIVE
+  // top set (unit has just left the root) and is not rejected with the 502
+  // "hierarchy changed beneath you".
+  const { unitToMove, newParentUnit, hatunit } = data;
+  const originalHierarchy = data.unitsToExpand; // [unitToMove] for a root move
+  const newHierarchy = data.newHierarchy; // [newParentUnit, unitToMove]
+
+  await unlockCompleteHierarchy(request, originalHierarchy, newHierarchy);
+  await updateUnitHierarchy(request, unitToMove, newParentUnit, 1, hatunit);
+  // Re-lock the source top (the moved unit, which WAS a top-level unit) and the
+  // destination top so both branches return to a locked, consistent state.
+  await lockCompleteHierarchy(request, [originalHierarchy[0], newHierarchy[0]]);
+
   // Confirm the move genuinely happened so this entry still asserts something
   // real rather than passing blindly. The unit must now report its new parent.
   const landed = await waitForUnitParent(
     request,
     data.unitToMove,
     data.newParentUnit,
-    10_000,
+    30_000,
   );
   expect(
     landed,
@@ -299,44 +329,97 @@ async function runValuePreservation(
   await withPhase('Add makat from dropdown', ctx, () =>
     hierarchyPage.addMakatFromDropdown(makatId),
   );
-  await withPhase('Expand original hierarchy', ctx, () =>
-    hierarchyPage.expandHierarchyToLeaf(makatId, originalHierarchy),
-  );
 
-  // ── Capture the freestyle suffix chosen to reach the gdud leaf ──────────
-  // If `unitToMove` is NOT itself a gdud (leaf), `expandHierarchyToLeaf`
-  // randomly opened deeper children (appended in place to `originalHierarchy`)
-  // until it reached a leaf, and `setLeafCellValues` set values there too.
-  // The moved unit carries its ENTIRE subtree across the move, so we must
-  // REPLAY this exact suffix under the new parent afterwards — otherwise the
-  // post-move expand would randomly open a *different* subtree (whose cells
-  // were never captured BEFORE) and the value-preservation check could not
-  // line up the same units on both sides.
-  const moveIdx = originalHierarchy.indexOf(unitToMove);
-  const freestyleSuffix =
-    moveIdx >= 0 ? originalHierarchy.slice(moveIdx + 1) : [];
-  // Units whose value must be preserved across the move: the moved unit
-  // itself plus every freestyle descendant it carries with it.
-  const unitsToVerify = [unitToMove, ...freestyleSuffix];
-  console.log(
-    `[FREESTYLE PATH SAVED] Suffix below moved unit ${unitToMove}: [${freestyleSuffix.join(
-      ' → ',
-    )}] (units to verify: [${unitsToVerify.join(', ')}], full original path: [${originalHierarchy.join(
-      ' → ',
-    )}])`,
-  );
+  // ── BEFORE phase (expand → set values → capture → save), guarded against a
+  //    SILENT expansion failure ──────────────────────────────────────────────
+  // `expandHierarchyToLeaf` STOPS without throwing if a unit's cell never
+  // renders (e.g. a deep-carousel top unit whose row didn't hydrate because a
+  // backend response timed out). When that happens `setLeafCellValues` no-ops
+  // and the moved unit's BEFORE value is never captured. Because the move below
+  // is IRREVERSIBLE and retries are disabled for this suite, we must NOT proceed
+  // on that bad precondition — doing so destroys the BEFORE state and only later
+  // surfaces a misleading "AFTER=0 / BEFORE=MISSING" value-preservation mismatch
+  // (the real cause being a missed capture, not a product bug).
+  //
+  // So: VERIFY the moved subtree was actually captured. While it is still SAFE
+  // (nothing has moved yet) reload-and-retry the whole BEFORE phase. Only a
+  // genuinely unrecoverable capture aborts — early, and with an accurate message.
+  //
+  // The freestyle suffix (deeper children `expandHierarchyToLeaf` appended in
+  // place to reach a leaf) is recomputed each attempt: the moved unit carries
+  // its ENTIRE subtree across the move, so we replay this exact suffix under the
+  // new parent afterwards — otherwise the post-move expand could open a
+  // *different* subtree whose cells were never captured BEFORE.
+  const basePath = [...originalHierarchy]; // pristine data path, before any expand
+  const BEFORE_ATTEMPTS = 3;
+  let valuesBefore!: Map<number, number>;
+  let freestyleSuffix: number[] = [];
+  let unitsToVerify: number[] = [unitToMove];
 
-  // Set values + capture BEFORE + save, with built-in recovery from the
-  // transient top-level-set-change 502 ("hierarchy beneath you changed").
-  // `originalHierarchy` is the FULL path here (already expanded above,
-  // including any freestyle suffix), so retries replay it verbatim.
-  const valuesBefore = (await setValuesAndSaveResilient(
-    hierarchyPage,
-    ctx,
-    makatId,
-    originalHierarchy,
-    true,
-  ))!;
+  for (let attempt = 1; attempt <= BEFORE_ATTEMPTS; attempt++) {
+    // Reset the in-place path to its pristine form so a retry's re-expand does
+    // not append freestyle units twice.
+    originalHierarchy.length = 0;
+    originalHierarchy.push(...basePath);
+
+    await withPhase(
+      `Expand original hierarchy (attempt ${attempt}/${BEFORE_ATTEMPTS})`,
+      ctx,
+      () => hierarchyPage.expandHierarchyToLeaf(makatId, originalHierarchy),
+    );
+
+    const moveIdx = originalHierarchy.indexOf(unitToMove);
+    freestyleSuffix = moveIdx >= 0 ? originalHierarchy.slice(moveIdx + 1) : [];
+    // Units whose value must be preserved across the move: the moved unit
+    // itself plus every freestyle descendant it carries with it.
+    unitsToVerify = [unitToMove, ...freestyleSuffix];
+    console.log(
+      `[FREESTYLE PATH SAVED] Suffix below moved unit ${unitToMove}: [${freestyleSuffix.join(
+        ' → ',
+      )}] (units to verify: [${unitsToVerify.join(', ')}], full original path: [${originalHierarchy.join(
+        ' → ',
+      )}])`,
+    );
+
+    // Set values + capture BEFORE + save, with built-in recovery from the
+    // transient top-level-set-change 502 ("hierarchy beneath you changed").
+    // `originalHierarchy` is the FULL path here (already expanded above,
+    // including any freestyle suffix), so retries replay it verbatim.
+    valuesBefore = (await setValuesAndSaveResilient(
+      hierarchyPage,
+      ctx,
+      makatId,
+      originalHierarchy,
+      true,
+    ))!;
+
+    const missingBefore = unitsToVerify.filter((u) => !valuesBefore.has(u));
+    if (missingBefore.length === 0) break; // full BEFORE state captured ✓
+
+    if (attempt === BEFORE_ATTEMPTS) {
+      throw new Error(
+        `[ASSERTION: before-capture-incomplete] The BEFORE-move state for unit(s) ` +
+          `[${missingBefore.join(', ')}] (path [${basePath.join(' → ')}]) could not be captured after ` +
+          `${BEFORE_ATTEMPTS} attempts — expandHierarchyToLeaf never rendered their cell(s) (typically a ` +
+          `slow/timing-out backend response while paginating the carousel). Aborting BEFORE the ` +
+          `irreversible move so this surfaces as a capture failure rather than a later, misleading ` +
+          `"AFTER=0 / BEFORE=MISSING" value-preservation mismatch.`,
+      );
+    }
+
+    console.warn(
+      `[VP BEFORE-RETRY] Incomplete BEFORE capture — unit(s) [${missingBefore.join(', ')}] never ` +
+        `rendered (attempt ${attempt}/${BEFORE_ATTEMPTS}). Reloading and re-expanding before the move ` +
+        `(safe: nothing has been moved yet).`,
+    );
+    await withPhase(`Recover incomplete BEFORE capture (attempt ${attempt})`, ctx, async () => {
+      await hierarchyPage.page.reload();
+      await hierarchyPage.waitForMakatComboboxReady(30_000);
+      await hierarchyPage.addMakatFromDropdown(makatId);
+      await hierarchyPage.waitForMaterialRow(makatId, 15_000);
+    });
+  }
+
 
   await withPhase('Unlock complete hierarchy (API)', ctx, () =>
     unlockCompleteHierarchy(request, originalHierarchy, newHierarchy),
@@ -355,23 +438,52 @@ async function runValuePreservation(
   // surfacing later as `AFTER=MISSING`. The action button DOES commit to the
   // backend when it works, so a no-op is detectable immediately via the API.
   // Verify the reparent landed and retry the whole UI move if it did not.
+  //
+  // SEPARATELY, the move can THROW: if the destination parent's unlock did not
+  // persist (a backend blip during `unlockCompleteHierarchy`), that node renders
+  // LOCKED and COLLAPSED in the drawer and never exposes its combobox input, so
+  // `unitMoveUI` fails with "couldnt find target father unit N". That is
+  // recoverable — re-unlocking the destination branch via API (idempotent;
+  // already-unlocked units return a tolerated 409/422) and reloading restores
+  // the interactable, expanded node. We therefore treat BOTH a thrown move and a
+  // non-persisted move the same way: re-unlock the branch, reload, and retry.
   const MOVE_ATTEMPTS = 3;
   let moved = false;
   for (let attempt = 1; attempt <= MOVE_ATTEMPTS && !moved; attempt++) {
-    await withPhase(`Move unit via UI (attempt ${attempt}/${MOVE_ATTEMPTS})`, ctx, () =>
-      hierarchyPage.unitMoveUI(unitToMove, newParentUnit, newHierarchy, {
-        skipConfirmAndLock: true,
-      }),
-    );
-    // Short poll — the action button commits before we lock, so a successful
-    // move shows up within a few seconds.
-    moved = await waitForUnitParent(request, unitToMove, newParentUnit, 8_000);
-    if (!moved && attempt < MOVE_ATTEMPTS) {
-      console.warn(
-        `[VP] UI move attempt ${attempt}/${MOVE_ATTEMPTS} did not persist (unit ${unitToMove} not under ${newParentUnit}); reloading and retrying.`,
+    let threw: unknown;
+    try {
+      await withPhase(`Move unit via UI (attempt ${attempt}/${MOVE_ATTEMPTS})`, ctx, () =>
+        hierarchyPage.unitMoveUI(unitToMove, newParentUnit, newHierarchy, {
+          skipConfirmAndLock: true,
+        }),
       );
-      await hierarchyPage.page.reload();
-      await hierarchyPage.page.waitForLoadState('networkidle');
+      // Short poll — the action button commits before we lock, so a successful
+      // move shows up within a few seconds.
+      moved = await waitForUnitParent(request, unitToMove, newParentUnit, 8_000);
+    } catch (err) {
+      // A locked/collapsed destination parent (combobox never rendered) lands
+      // here. Recover by re-unlocking below, unless we're out of attempts.
+      threw = err;
+      if (attempt >= MOVE_ATTEMPTS) throw err;
+    }
+
+    if (!moved && attempt < MOVE_ATTEMPTS) {
+      const reason = threw
+        ? `threw (${String((threw as Error)?.message ?? threw).slice(0, 160)})`
+        : `did not persist (unit ${unitToMove} not under ${newParentUnit})`;
+      console.warn(
+        `[VP] UI move attempt ${attempt}/${MOVE_ATTEMPTS} ${reason}; re-unlocking the ` +
+          `destination branch (in case its unlock was dropped → node stayed LOCKED), reloading, and retrying.`,
+      );
+      // Re-assert the unlock of BOTH branches. This is the actual root-cause
+      // fix for the "target parent still locked" failure: a transient unlock
+      // loss leaves the parent un-interactable, and only a fresh unlock — not a
+      // bare reload — makes its combobox appear.
+      await withPhase(`Re-unlock + reload before move retry (attempt ${attempt})`, ctx, async () => {
+        await unlockCompleteHierarchy(request, originalHierarchy, newHierarchy);
+        await hierarchyPage.page.reload();
+        await hierarchyPage.page.waitForLoadState('networkidle');
+      });
     }
   }
   if (!moved) {
@@ -410,15 +522,57 @@ async function runValuePreservation(
       ' → ',
     )}]`,
   );
-  await withPhase('Expand new hierarchy', ctx, () =>
-    hierarchyPage.expandHierarchyToLeaf(makatId, newHierarchyFull),
-  );
-  const valuesAfter = await withPhase('Capture values AFTER move', ctx, () =>
-    hierarchyPage.captureAllVisibleCellValuesAtEachLevel(
-      makatId,
-      newHierarchyFull,
-    ),
-  );
+  // The backend has ALREADY confirmed the reparent (`waitForUnitParent` above),
+  // so the move itself is durable. What stays flaky is the UI RE-RENDER of the
+  // moved unit at its NEW location: right after a hierarchy mutation the
+  // destination top unit's row / carousel column can momentarily fail to
+  // hydrate (often following a 502 "hierarchy changed beneath you" churn), so
+  // the re-expand stops short and the moved unit is captured as AFTER=MISSING
+  // even though it IS present in the data. That is a rendering miss, NOT a value
+  // failure — recover it by reloading, re-adding the makat, re-expanding, and
+  // re-capturing. Bounded attempts; we only retry while the moved subtree is
+  // still MISSING from the AFTER snapshot.
+  const AFTER_ATTEMPTS = 3;
+  let valuesAfter!: Map<number, number>;
+  for (let attempt = 1; attempt <= AFTER_ATTEMPTS; attempt++) {
+    await withPhase(
+      `Expand new hierarchy (attempt ${attempt}/${AFTER_ATTEMPTS})`,
+      ctx,
+      () => hierarchyPage.expandHierarchyToLeaf(makatId, newHierarchyFull),
+    );
+    valuesAfter = await withPhase(
+      `Capture values AFTER move (attempt ${attempt}/${AFTER_ATTEMPTS})`,
+      ctx,
+      () =>
+        hierarchyPage.captureAllVisibleCellValuesAtEachLevel(
+          makatId,
+          newHierarchyFull,
+        ),
+    );
+
+    const missingAfter = unitsToVerify.filter((u) => !valuesAfter.has(u));
+    if (missingAfter.length === 0) break; // full AFTER state rendered ✓
+
+    if (attempt < AFTER_ATTEMPTS) {
+      console.warn(
+        `[VP] AFTER-move capture is missing unit(s) [${missingAfter.join(', ')}] ` +
+          `even though the backend confirmed the reparent (unit ${unitToMove} → parent ` +
+          `${newParentUnit}). The destination subtree likely did not re-render. Reloading, ` +
+          `re-adding makat ${makatId}, and re-expanding [${newHierarchyFull.join(' → ')}] ` +
+          `before re-capturing (attempt ${attempt}/${AFTER_ATTEMPTS}).`,
+      );
+      await withPhase(
+        `Reload + re-add makat before AFTER retry (attempt ${attempt})`,
+        ctx,
+        async () => {
+          await hierarchyPage.page.reload();
+          await hierarchyPage.waitForMakatComboboxReady(30_000);
+          await hierarchyPage.addMakatFromDropdown(makatId);
+          await hierarchyPage.waitForMaterialRow(makatId, 15_000);
+        },
+      );
+    }
+  }
 
   // ─── Final assertions with explicit, actionable error messages ───────────
   // Value preservation must hold for the moved unit AND every freestyle
@@ -465,6 +619,106 @@ async function runValuePreservation(
       ', ',
     )}] preserved after move!\n`,
   );
+}
+
+/**
+ * Capture all visible cell values along `fullPath` and verify the aggregation
+ * invariant (parent = Σ children), RE-POLLING across reloads to absorb the
+ * backend's asynchronous rollup lag after a hierarchy move.
+ *
+ * After a unit MOVE the backend recomputes every ancestor's rollup
+ * asynchronously. Capturing + verifying the instant the move lands can catch a
+ * parent cell still showing its PRE-move sum (the rollup hasn't propagated
+ * yet), producing a FALSE "parent ≠ Σ children" failure for a product that is
+ * actually converging to the correct value. To tell a genuine aggregation bug
+ * apart from transient lag we re-capture + re-verify across a few reloads; only
+ * a result that NEVER reconciles within the budget is reported as a failure.
+ *
+ * The page object's `verifyAggregationWithAllVisibleCells` stays single-shot
+ * and pure — the polling lives here at the orchestration layer (mirroring the
+ * BEFORE-capture and UI-move retry loops elsewhere in this file).
+ *
+ * @param fullPath   the COMPLETE expanded path (already ending at a real leaf),
+ *                   so re-expanding it on each retry is idempotent.
+ * @param phaseLabel human-readable prefix for the emitted `withPhase` steps.
+ * @returns the reconciled snapshot plus the final aggregation result — `ok` is
+ *          true as soon as a capture reconciles, else false after the last
+ *          attempt (the caller asserts on it). `values` is always the LAST
+ *          capture, so callers can run further checks on the same snapshot.
+ */
+async function captureAndVerifyAggregationResilient(
+  hierarchyPage: ShechelPage,
+  ctx: Record<string, unknown>,
+  makatId: string,
+  fullPath: number[],
+  phaseLabel: string,
+  /**
+   * Optional extra reconciliation predicate evaluated against each capture.
+   * When provided, a snapshot only counts as reconciled if BOTH the aggregation
+   * invariant AND this predicate hold. Used by the OLD-hierarchy flow to fold
+   * the "moved unit has left the old subtree" condition into the same re-poll,
+   * because that absence is subject to the same post-move rollup lag (a parent
+   * can stay numerically consistent with the moved unit still listed until the
+   * rollup propagates). Must be side-effect-free; the caller still runs its own
+   * detailed assertion on the returned `values`.
+   */
+  extraCheck?: (values: Map<number, number>) => boolean,
+): Promise<{ ok: boolean; values: Map<number, number> }> {
+  const AGG_ATTEMPTS = Number(process.env.HC_AGG_ATTEMPTS ?? 3);
+  let values = new Map<number, number>();
+  let ok = false;
+
+  for (let attempt = 1; attempt <= AGG_ATTEMPTS; attempt++) {
+    values = await withPhase(
+      `${phaseLabel}: capture (attempt ${attempt}/${AGG_ATTEMPTS})`,
+      ctx,
+      () =>
+        hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, fullPath),
+    );
+
+    const aggOk = await withPhase(
+      `${phaseLabel}: verify (attempt ${attempt}/${AGG_ATTEMPTS})`,
+      ctx,
+      () =>
+        hierarchyPage.verifyAggregationWithAllVisibleCells(
+          makatId,
+          fullPath,
+          values,
+        ),
+    );
+    ok = aggOk && (extraCheck ? extraCheck(values) : true);
+
+    if (ok) return { ok, values }; // aggregation reconciled ✓
+
+    if (attempt < AGG_ATTEMPTS) {
+      console.warn(
+        `[AGG RE-POLL] Aggregation not yet consistent on [${fullPath.join(
+          ' → ',
+        )}] (attempt ${attempt}/${AGG_ATTEMPTS}). Likely backend rollup lag after the ` +
+          `move; reloading, re-expanding the same complete path, and re-checking.`,
+      );
+      await withPhase(
+        `${phaseLabel}: reload + re-expand before re-poll (attempt ${attempt})`,
+        ctx,
+        async () => {
+          await hierarchyPage.page.reload();
+          await hierarchyPage.waitForMakatComboboxReady(30_000);
+          await hierarchyPage.waitForMaterialRow(makatId, 15_000);
+          // `fullPath` already ends at a real leaf, so this re-opens exactly it
+          // and appends nothing (idempotent).
+          await hierarchyPage.expandHierarchyToLeaf(makatId, fullPath);
+        },
+      );
+    }
+  }
+
+  console.warn(
+    `[AGG RE-POLL] Aggregation still inconsistent on [${fullPath.join(
+      ' → ',
+    )}] after ${AGG_ATTEMPTS} attempts — reporting as a real aggregation failure ` +
+      `(not transient lag).`,
+  );
+  return { ok, values };
 }
 
 async function runAggregation(
@@ -556,26 +810,16 @@ async function runAggregation(
   );
 
   console.log(`\n[CAPTURING ALL VISIBLE CELLS] Including all siblings at each level...`);
-  const allVisibleValues = await withPhase(
-    'Capture values for new hierarchy',
-    ctx,
-    () =>
-      hierarchyPage.captureAllVisibleCellValuesAtEachLevel(
-        makatId,
-        newHierarchyFull,
-      ),
-  );
-
   console.log(`\n[AGGREGATION VERIFICATION FOR NEW HIERARCHY]`);
-  const aggregationValid = await withPhase(
-    'Verify aggregation for new hierarchy',
+  // Re-poll across reloads: a freshly-moved subtree's ancestor rollups settle
+  // asynchronously, so a single-shot check can observe a parent still holding
+  // its pre-move sum. Only a result that never reconciles is a real failure.
+  const { ok: aggregationValid } = await captureAndVerifyAggregationResilient(
+    hierarchyPage,
     ctx,
-    () =>
-      hierarchyPage.verifyAggregationWithAllVisibleCells(
-        makatId,
-        newHierarchyFull,
-        allVisibleValues,
-      ),
+    makatId,
+    newHierarchyFull,
+    'Aggregation (new hierarchy)',
   );
   expect(
     aggregationValid,
@@ -664,18 +908,7 @@ async function runOldHierarchyAggregation(
   );
 
   console.log(`\n[CAPTURING ALL VISIBLE CELLS] For old hierarchy after unit removal...`);
-  const oldHierarchyValues = await withPhase(
-    'Capture values for OLD hierarchy',
-    { ...ctx, oldHierarchyPath },
-    () =>
-      hierarchyPage.captureAllVisibleCellValuesAtEachLevel(
-        makatId,
-        oldHierarchyPath,
-      ),
-  );
-
-  console.log(`\n[MOVED UNIT ABSENCE CHECK]`);
-  // Whether the moved unit fully LEAVES the old top-level branch depends on
+  // Whether the moved unit must fully LEAVE the old top-level branch depends on
   // the move category:
   //   • CROSS-TOP move  (newHierarchy[0] !== originalHierarchy[0]) — the unit
   //     lands under a DIFFERENT top unit, so it must disappear entirely from
@@ -686,9 +919,28 @@ async function runOldHierarchyAggregation(
   //     just nested under its new parent. Asserting global absence here would
   //     be wrong (the product is behaving correctly). We only require that it
   //     is no longer a DIRECT child of `oldParentUnit`; it is expected to
-  //     still appear deeper, and the aggregation invariant below validates
-  //     that the old hierarchy re-sums correctly with the unit relocated.
+  //     still appear deeper, and the aggregation invariant validates that the
+  //     old hierarchy re-sums correctly with the unit relocated.
   const crossesTop = originalHierarchy[0] !== newHierarchy[0];
+
+  console.log(`\n[AGGREGATION VERIFICATION FOR OLD HIERARCHY]`);
+  // Re-poll across reloads: after the move the old parent's rollup recomputes
+  // asynchronously, and a cross-top moved unit can briefly linger in the old
+  // subtree until the rollup propagates. Fold BOTH conditions (aggregation
+  // re-sums AND, for cross-top moves, the moved unit has left) into the same
+  // re-poll so transient lag settles before we assert. The detailed assertions
+  // below then run on the SETTLED snapshot.
+  const { ok, values: oldHierarchyValues } =
+    await captureAndVerifyAggregationResilient(
+      hierarchyPage,
+      { ...ctx, oldHierarchyPath },
+      makatId,
+      oldHierarchyPath,
+      'Aggregation (old hierarchy)',
+      crossesTop ? (vals) => !vals.has(unitToMove) : undefined,
+    );
+
+  console.log(`\n[MOVED UNIT ABSENCE CHECK]`);
   if (crossesTop) {
     if (oldHierarchyValues.has(unitToMove)) {
       const staleValue = oldHierarchyValues.get(unitToMove);
@@ -707,17 +959,6 @@ async function runOldHierarchyAggregation(
     );
   }
 
-  console.log(`\n[AGGREGATION VERIFICATION FOR OLD HIERARCHY]`);
-  const ok = await withPhase(
-    'Verify aggregation for OLD hierarchy',
-    { ...ctx, oldHierarchyPath },
-    () =>
-      hierarchyPage.verifyAggregationWithAllVisibleCells(
-        makatId,
-        oldHierarchyPath,
-        oldHierarchyValues,
-      ),
-  );
   expect(
     ok,
     `[ASSERTION: aggregation-invalid-old-hierarchy] Aggregation rule (parent = sum(children)) violated on the OLD hierarchy [${oldHierarchyPath.join(
@@ -758,12 +999,72 @@ test.describe.configure({ retries: 0 });
 
 for (const cluster of groupByWriteSetComponents(tagged)) {
   test.describe.serial(`Mixed@units[${clusterLabelAll(cluster)}]`, () => {
+    // ─── CAROUSEL-BLOAT FIX: release this cluster's locks when it finishes ───
+    //
+    // The top-units carousel renders EVERY locked top-level unit across ALL
+    // workers. `beforeEach` locks each entry's source top but nothing ever
+    // unlocked them, so locks ACCUMULATED for the whole run — the carousel grew
+    // to ~70 units, pushing a test's target deep into pagination and causing the
+    // slow-backend "before-capture" timeouts (the HORIZONTAL Gdud failures).
+    //
+    // Releasing a cluster's top units once its serial tests are done keeps the
+    // live carousel small, so later clusters paginate far less. We unlock only
+    // the TOP units this cluster locked (children of Matkal); deeper units are
+    // already unlocked by each move flow. Best-effort: a cleanup hiccup must
+    // never fail an otherwise-green cluster, so every error is logged, not
+    // thrown. Runs on its OWN short-lived API context because the test-scoped
+    // `request` fixture is not available inside `afterAll`.
+    test.afterAll(async () => {
+      const topUnits = [
+        ...new Set(
+          cluster.flatMap((e) => topUnitsOf(e)).filter((u) => u !== 1),
+        ),
+      ];
+      if (topUnits.length === 0) return;
+
+      const label = clusterLabelAll(cluster);
+      let ctx: APIRequestContext | undefined;
+      try {
+        ctx = await apiRequest.newContext();
+        // Unlock each top unit (status 0) directly under Matkal (father=1).
+        // `lockUnitStatus` already retries transient network blips internally.
+        for (const unit of topUnits) {
+          try {
+            await lockUnitStatus(ctx, [unit], 1, 0);
+          } catch (err) {
+            console.warn(
+              `[afterAll cleanup] Could not unlock top unit ${unit} for cluster ` +
+                `[${label}]: ${String(err).slice(0, 160)} — leaving it locked (carousel ` +
+                `will be slightly larger but tests are unaffected).`,
+            );
+          }
+        }
+        console.log(
+          `[afterAll cleanup] Released top units [${topUnits.join(', ')}] for cluster [${label}].`,
+        );
+      } catch (err) {
+        console.warn(
+          `[afterAll cleanup] Could not create API context to release locks for cluster ` +
+            `[${label}]: ${String(err).slice(0, 160)} — skipping cleanup (non-fatal).`,
+        );
+      } finally {
+        await ctx?.dispose().catch(() => undefined);
+      }
+    });
+
     cluster.forEach((entry) => {
       test(`${TEST_NAME[entry._kind]}[${entry.description}]`, async ({
         hierarchyPage,
         request,
       }) => {
-        test.setTimeout(180_000);
+        // Per-test ceiling. These flows do a lot of slow UI work (carousel
+        // pagination, makat combobox hydration, multiple reloads) plus several
+        // API round-trips, so a momentarily slow backend can legitimately push
+        // a CORRECT test past the old 180s limit (passing runs were already
+        // landing at ~2.5–3.1m). Give healthy head-room under the global 300s
+        // config timeout so transient slowness is absorbed instead of being
+        // reported as a failure. Override with HC_TEST_TIMEOUT_MS when needed.
+        test.setTimeout(Number(process.env.HC_TEST_TIMEOUT_MS ?? 270_000));
         if (entry._kind === 'VP') {
           await runValuePreservation(hierarchyPage, request, entry);
         } else if (entry._kind === 'AGG') {

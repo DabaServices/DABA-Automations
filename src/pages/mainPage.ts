@@ -213,8 +213,14 @@ export class MainPage {
    * Critical to call BEFORE `revealUnitInCarousel` / `expandHierarchyToLeaf`
    * on retries — otherwise carousel state accumulates across attempts and
    * we keep paginating further and further from the units we want.
+   *
+   * `maxClicks` must be ≥ the number of LOCKED top-level units (the carousel
+   * only lists locked tops; the live set peaks around 70). A cap below that
+   * leaves the carousel stranded mid-list on reset — e.g. with a cap of 40 a
+   * carousel parked at index 47 only rewinds to index 7, never the leftmost
+   * page — which then makes downstream reveals miss low-numbered targets.
    */
-  protected async resetCarouselToLeftmost(maxClicks = 40): Promise<void> {
+  protected async resetCarouselToLeftmost(maxClicks = 80): Promise<void> {
     const prevBtn = this.carouselPrevButton();
     for (let i = 0; i < maxClicks; i++) {
       const disabled = await prevBtn
@@ -248,7 +254,8 @@ export class MainPage {
   protected async revealUnitInCarousel(
     materialId: string,
     unitId: number,
-    maxClicks = 40,
+    maxClicks = 80,
+    deadlineMs?: number,
   ): Promise<boolean> {
     // AUTHORITATIVE source of truth: the carousel header label
     // `typography-label-content-header-unit-${unitId}` only EXISTS in the
@@ -263,6 +270,14 @@ export class MainPage {
     const isUnitOnVisiblePage = async (): Promise<boolean> =>
       (await header.count()) > 0;
 
+    // How long to let a carousel page-swap COMMIT before re-checking for the
+    // target. Bounded so a fast backend isn't slowed, but generous enough that
+    // a laggy one finishes hydrating the next page before we'd otherwise click
+    // past it. Override via CAROUSEL_PAGE_SWAP_MS on a known-slow backend.
+    const PAGE_SWAP_SETTLE_MS = Number(
+      process.env.CAROUSEL_PAGE_SWAP_MS ?? 1_500,
+    );
+
     // The loading overlay swallows carousel "next" clicks (they look like they
     // landed but the page never swaps), making the carousel appear exhausted
     // before the target unit is reached. Wait for it to clear up-front.
@@ -276,9 +291,39 @@ export class MainPage {
     // next arrow disappears (= end of the list).
     const nextBtn = this.carouselNextButton();
     for (let i = 0; i < maxClicks; i++) {
+      // Respect a caller-supplied wall-clock budget so a slow backend cannot
+      // make pagination run until the whole test timeout is exhausted (which
+      // tears the page down mid-click → confusing "Target page … closed").
+      if (deadlineMs !== undefined && Date.now() > deadlineMs) {
+        console.warn(
+          `[revealUnitInCarousel] Deadline reached after ${i} click(s) — unit ${unitId} ` +
+            `still not on a visible carousel page. Aborting reveal early.`,
+        );
+        return await isUnitOnVisiblePage();
+      }
       // Re-check before EACH click: a spinner can reappear between pages while
       // the next carousel chunk loads. Clicking through it is a silent no-op.
       await this.waitForAmmoLoadingGone();
+
+      // Late-hydration guard (slow-backend flake fix): the page swapped in by
+      // the PREVIOUS iteration's click may have committed the target's header
+      // only AFTER that iteration's own check ran. Re-check now — BEFORE
+      // clicking again — so we never paginate straight PAST a unit that
+      // rendered late on a loaded backend. This is the root cause of the
+      // intermittent "unit never rendered → before-capture-incomplete"
+      // failures (e.g. the HORIZONTAL Gdud moves that timed out mid-pagination).
+      if (await isUnitOnVisiblePage()) {
+        console.info(
+          `[revealUnitInCarousel] Unit ${unitId} present after page-swap settle ` +
+            `(late hydration caught before paginating past it).`,
+        );
+        await cell
+          .first()
+          .waitFor({ state: 'attached', timeout: 2_000 })
+          .catch(() => undefined);
+        return true;
+      }
+
       const arrowVisible = await nextBtn
         .first()
         .isVisible({ timeout: 200 })
@@ -302,8 +347,23 @@ export class MainPage {
             .evaluate((el) => (el as HTMLElement).click())
             .catch(() => undefined);
         });
-      // Wait briefly for the carousel page swap to complete.
-      await this.page.waitForTimeout(150);
+
+      // Wait for the carousel page-swap to actually COMMIT before deciding
+      // whether the target is present. A fixed `waitForTimeout(150)` raced the
+      // backend: on a slow response the next page hadn't hydrated yet, the
+      // header check below returned false, and the loop clicked PAST the unit —
+      // the precise mechanism behind the slow-backend before-capture timeouts.
+      //
+      // Instead: (1) let any inter-page loading overlay clear, then (2) give
+      // the TARGET header a short bounded window to attach. If it attaches we
+      // fall straight into the success branch; if not, we've still spent only
+      // the swap time and move on to the next page. Net effect: robust to a
+      // laggy backend, no slower on a fast one.
+      await this.waitForAmmoLoadingGone();
+      await this.topUnitHeaderLabel(unitId)
+        .first()
+        .waitFor({ state: 'attached', timeout: PAGE_SWAP_SETTLE_MS })
+        .catch(() => undefined);
 
       if (await isUnitOnVisiblePage()) {
         console.info(
@@ -339,7 +399,7 @@ export class MainPage {
    * Resets the carousel to the leftmost page first so accumulated pagination
    * state from a previous step doesn't cause a false negative.
    */
-  async isTopUnitOnCarousel(unitId: number, maxClicks = 40): Promise<boolean> {
+  async isTopUnitOnCarousel(unitId: number, maxClicks = 80): Promise<boolean> {
     const header = this.topUnitHeaderLabel(unitId);
     await this.resetCarouselToLeftmost().catch(() => undefined);
 
@@ -652,24 +712,45 @@ export class MainPage {
    */
   async waitForMakatComboboxReady(timeout: number = 15000): Promise<void> {
     console.info(`[waitForMakatComboboxReady] Waiting for makat combobox to be ready (${timeout}ms)...`);
-    try {
-      // The combobox can briefly disappear/remount while React rehydrates
-      // after the lock & hierarchy fetches finish. `waitForSelector` polls
-      // the DOM and returns once the element is visible — that's already
-      // a strong-enough signal for "rendered". A separate `toBeEnabled`
-      // assertion guarantees React has finished hydrating it.
-      await this.page.waitForSelector('[role="combobox"]', {
-        state: 'visible',
-        timeout,
-      });
-      await expect(this.makatCombobox).toBeEnabled({ timeout: Math.min(10_000, timeout) });
+    // One self-healing reload before giving up. Under backend load the combobox
+    // (which only renders after the lock + hierarchy fetch settle) can miss its
+    // first paint and time out. Previously that bubbled up and triggered a FULL
+    // makat re-add (another 30–60s) or failed the whole flow. A single reload
+    // re-mounts React cleanly and usually brings the combobox up immediately —
+    // far cheaper than the caller's heavyweight recovery, and it absorbs exactly
+    // the transient slowness that flooded the end of loaded 3-worker runs.
+    const attempts = 2;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        // The combobox can briefly disappear/remount while React rehydrates
+        // after the lock & hierarchy fetches finish. `waitForSelector` polls
+        // the DOM and returns once the element is visible — that's already
+        // a strong-enough signal for "rendered". A separate `toBeEnabled`
+        // assertion guarantees React has finished hydrating it.
+        await this.page.waitForSelector('[role="combobox"]', {
+          state: 'visible',
+          timeout,
+        });
+        await expect(this.makatCombobox).toBeEnabled({ timeout: Math.min(10_000, timeout) });
 
-      await this.makatCombobox.scrollIntoViewIfNeeded();
-      console.info(`[waitForMakatComboboxReady] Makat combobox is ready`);
-    } catch (error) {
-      console.error(`[waitForMakatComboboxReady] Failed: ${error}`);
-      throw error;
+        await this.makatCombobox.scrollIntoViewIfNeeded();
+        console.info(`[waitForMakatComboboxReady] Makat combobox is ready`);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt === attempts) break;
+        console.warn(
+          `[waitForMakatComboboxReady] Combobox not ready on attempt ${attempt}/${attempts} — ` +
+            `reloading to re-mount React and retrying (absorbs transient backend slowness).`,
+        );
+        await this.page
+          .reload({ waitUntil: 'domcontentloaded', timeout: 30_000 })
+          .catch(() => undefined);
+      }
     }
+    console.error(`[waitForMakatComboboxReady] Failed: ${lastError}`);
+    throw lastError;
   }
 
   /**
