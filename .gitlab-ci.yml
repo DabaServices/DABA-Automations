@@ -1,0 +1,37 @@
+# מגדיר את ה"מכונה" (Docker Image) שתריץ את הקוד - גרסה רשמית של Playwright
+image: mcr.microsoft.com/playwright:v1.58.2-jammy
+
+# מגדיר את סדר השלבים ב-Pipeline: קודם התקנות ואז הרצת טסטים
+stages:
+  - install
+  - test
+
+# הגדרת מטמון: שומר את תיקיית הספריות כדי שלא נצטרך להוריד הכל מחדש בכל ריצה
+cache:
+  key: ${CI_COMMIT_REF_SLUG} # מפתח ייחודי לפי שם ה-Branch (כדי שלא יהיה ערבוב בין ענפים)
+  paths:
+    - node_modules/        # התיקייה שאותה אנחנו רוצים ש-GitLab יזכור לפעם הבאה
+
+# הג'וב הראשון: הכנת הסביבה
+install:
+  stage: install           # שיוך לשלב ה-install שהגדרנו למעלה
+  script:
+    - npm ci               # התקנה נקייה של כל החבילות (Libraries) מה-package-lock.json
+    - npx playwright install --with-deps # התקנת הדפדפנים (Chromium/Firefox) והתלויות שלהם
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"' # הג'וב ירוץ רק כשיש Push חדש לקוד
+
+# הג'וב השני: הרצת הבדיקות
+smoke-tests:
+  stage: test              # שיוך לשלב ה-test
+  script:
+     - npm ci                       # התקנת הספריות
+     - npx playwright install --with-deps # התקנת הדפדפנים (חשוב!)
+     - npx playwright test --grep @smoke # כאן הוספנו את הדגל
+  artifacts:               # הגדרת "תוצרים" שנרצה לשמור מהריצה
+    when: always           # שמור את התוצרים גם אם הטסט עבר וגם אם נכשל
+    paths:
+      - playwright-report/ # הנתיב לדו"ח ה-HTML ש-Playwright מייצר בסוף
+    expire_in: 7 days      # מחיקת הדו"ח באופן אוטומטי מהשרת אחרי שבוע (כדי לחסוך מקום)
+  rules:
+    - when: always         # הג'וב הזה תמיד ינסה לרוץ אחרי ששלב ה-install הסתיים

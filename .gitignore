@@ -1,0 +1,23 @@
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+
+# Allure
+/allure-results/
+/allure-report/
+
+# macOS
+.DS_Store
+*.fileloc
+
+# Docker
+docker-compose.yml
+
+test-results/
+
+# data-builder hierarchy cache
+/.cache/

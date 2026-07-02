@@ -1,0 +1,20 @@
+ {
+ "test_hierarchicalChangeValuePreservation": [
+   {
+     "description": "Value Preservation",
+     "hatunit": 1
+   }
+ ],
+ "test_hierarchicalChangeAggregation": [
+   {
+     "description": "Aggregation Verification",
+     "hatunit": 1
+   }
+ ],
+ "test_hierarchicalChangeOldHierarchyAggregation": [
+   {
+     "description": "Old Hierarchy Aggregation",
+     "hatunit": 1
+   }
+ ]
+}

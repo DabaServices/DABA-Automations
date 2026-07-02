@@ -1,0 +1,27 @@
+{
+  "name": "automation",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "build:data": "tsx scripts/data-builder.ts",
+    "build:data:regular": "TEST_TYPE=REGULAR npm run build:data",
+    "build:data:hierarchy": "TEST_TYPE=HIERARCHY_CHANGE npm run build:data",
+    "clean:reports": "rm -rf allure-results allure-report playwright-report test-results",
+    "test:fresh": "npm run clean:reports && npm run build:data:hierarchy && npm test",
+    "allure:generate": "allure generate allure-results --clean -o allure-report",
+    "allure:open": "allure open allure-report",
+    "allure:report": "npm run allure:generate && npm run allure:open"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.3.5",
+    "allure-playwright": "^3.9.0",
+    "playwright-mcp": "^0.0.19",
+    "tsx": "^4.21.0"
+  }
+}
