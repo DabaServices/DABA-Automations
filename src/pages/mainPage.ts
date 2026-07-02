@@ -153,7 +153,9 @@ export class MainPage {
 
   /** Numbered cell locator for a (materialId, unitId) pair. */
   protected numberedCell(materialId: string, unitId: number): Locator {
-    return this.page.locator(`[data-testid*="numbered-cell-${materialId}-${unitId}"]`).first();
+    // End-anchored ($=) NOT substring (*=): a substring match for unit 23 also
+    // matches 237/239 (their testids contain "…-23"), returning the WRONG cell.
+    return this.page.locator(`[data-testid$="numbered-cell-${materialId}-${unitId}"]`).first();
   }
 
   /** Top-level row cell locator for a (materialId, unitId) pair. */
@@ -475,7 +477,7 @@ export class MainPage {
       const sel =
         `[data-testid="row-cell-${materialId}-${unitId}"], ` +
         `[data-testid="sub-row-cell-${materialId}-${unitId}"], ` +
-        `[data-testid*="numbered-cell-${materialId}-${unitId}"]`;
+        `[data-testid$="numbered-cell-${materialId}-${unitId}"]`;
       return (await this.page.locator(sel).count()) > 0;
     };
 
@@ -621,9 +623,32 @@ export class MainPage {
    * subresources or `networkidle` (the SPA keeps long-poll connections
    * open, which makes those waits unreliable). Callers that need stronger
    * readiness should chain `waitForMakatComboboxReady` afterwards.
+   *
+   * RETRY: the initial load can time out when the backend/frontend is briefly
+   * overloaded by parallel workers. Navigation is side-effect-free (it happens
+   * BEFORE any hierarchy mutation), so retrying it is safe even though the
+   * hierarchy-change suite disables full-test retries for irreversible moves.
+   * We attempt up to 3 times before surfacing the timeout.
    */
   async goto(): Promise<void> {
-    await this.page.goto('/', { waitUntil: 'domcontentloaded' });
+    const maxAttempts = 3;
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        await this.page.goto('/', { waitUntil: 'domcontentloaded' });
+        return;
+      } catch (err) {
+        lastError = err;
+        const msg = String((err as Error)?.message ?? err).slice(0, 120);
+        if (attempt === maxAttempts) break;
+        console.warn(
+          `[goto] Page load attempt ${attempt}/${maxAttempts} failed (${msg}); retrying…`,
+        );
+        // Brief backoff so the backend has a moment to recover before retry.
+        await this.page.waitForTimeout(1000 * attempt);
+      }
+    }
+    throw lastError;
   }
 
   /**
@@ -943,9 +968,10 @@ export class MainPage {
         const fromRow = readInput(rowCell);
         if (fromRow != null && fromRow !== '') return fromRow;
 
-        // Fallback: any numbered-cell match.
+        // Fallback: any numbered-cell match. End-anchored ($=) so unit 23 does
+        // not also match 237/239 (whose testids contain "…-23").
         const numbered = document.querySelector(
-          `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
+          `[data-testid$="numbered-cell-${materialId}-${unitId}"]`
         );
         const fromNumbered = readInput(numbered);
         return fromNumbered ?? '0';
@@ -1016,8 +1042,14 @@ export class MainPage {
           const subRowCell = document.querySelector(
             `[data-testid="sub-row-cell-${materialId}-${unitId}"]`
           );
+          // End-anchored ($=) NOT substring (*=): a substring match for unit 23
+          // ALSO matches 237/239 (their testids end in "…-23" + more digits),
+          // so querySelector would return the WRONG unit's cell and report its
+          // value for 23 — the exact mis-read that failed the Gdud(449) /
+          // Unit 23 old-hierarchy aggregation check (captured 23=1/2 while the
+          // real cell showed 11).
           const numbered = document.querySelector(
-            `[data-testid*="numbered-cell-${materialId}-${unitId}"]`
+            `[data-testid$="numbered-cell-${materialId}-${unitId}"]`
           );
           // If NONE of the possible cell selectors exist, the unit is not
           // currently rendered — return null so the caller can record it as

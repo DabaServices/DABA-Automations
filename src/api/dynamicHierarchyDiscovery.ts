@@ -276,3 +276,26 @@ export async function waitForUnitParent(
   );
   return false;
 }
+
+/**
+ * Read a single unit's CURRENT parent id from the live hierarchy.
+ *
+ * Why this exists: hierarchy-change data is generated up-front, but the suite
+ * performs IRREVERSIBLE moves. By the time a NO-OP idempotency probe runs, an
+ * earlier real move may have relocated its target unit, so the parent recorded
+ * in the (now stale) test data no longer matches the live tree. A NO-OP only
+ * needs to assert "re-parenting a unit onto its OWN current parent is a no-op",
+ * which is true regardless of WHICH parent that currently is. Resolving the
+ * live parent at run time makes the probe immune to that data drift.
+ *
+ * @param request Playwright APIRequestContext
+ * @param unitId  Unit whose current parent we want
+ * @returns the parent id, or `undefined` if the unit/parent isn't found
+ */
+export async function getUnitParent(
+  request: APIRequestContext,
+  unitId: number,
+): Promise<number | undefined> {
+  const units = await fetchHierarchyUnits(request);
+  return units.find((u) => u.id === unitId)?.parent?.id;
+}

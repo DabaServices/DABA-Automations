@@ -1,16 +1,20 @@
 {
   "hierarchicalAggregationTestData": [
     {
-      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 401 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
+        2,
+        11,
+        101,
         401
       ]
     },
     {
-      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 402 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
+        3,
         12,
         102,
         402
@@ -20,55 +24,55 @@
   "makatValidationTestData": [
     {
       "index": 0,
-      "materialId": "000000006",
       "description": "Material 1 - Basic Validation [unit 403 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
         4,
         13,
-        193,
+        103,
         403
       ]
     }
   ],
   "hierarchyExpansionTestData": [
     {
-      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 404 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
         5,
         14,
-        194,
+        104,
         404
       ]
     },
     {
-      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 405 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
         6,
         15,
-        195,
+        105,
         405
       ]
     }
   ],
   "leafCellClickabilityTestData": [
     {
-      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 406 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
         7,
-        97,
-        187,
+        16,
+        106,
         406
       ]
     },
     {
-      "materialId": "000000006",
       "description": "Hierarchical Aggregation Test - Matkal Level [unit 407 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
         8,
-        98,
+        17,
         107,
         407
       ]
@@ -76,23 +80,23 @@
   ],
   "saveFunctionalityTestData": [
     {
-      "materialId": "000000006",
       "description": "Save Button Functionality Test [unit 408 / Gdud]",
       "testValue": 5,
+      "materialId": "000000006",
       "unitsToExpand": [
         9,
-        99,
+        18,
         108,
         408
       ]
     },
     {
-      "materialId": "000000006",
       "description": "Save Button Functionality Test [unit 409 / Gdud]",
       "testValue": 5,
+      "materialId": "000000006",
       "unitsToExpand": [
         10,
-        100,
+        19,
         109,
         409
       ]
@@ -100,17 +104,20 @@
   ],
   "commentFunctionalityTestData": [
     {
-      "materialId": "000000006",
       "description": "Add Comment to Material Test",
       "commentText": "This is a test comment added via smoke test",
-      "rowIndex": 0
+      "rowIndex": 0,
+      "materialId": "000000006"
     }
   ],
   "deleteMakatTestData": [
     {
-      "materialId": "000000006",
       "description": "Delete Material from Table Test [unit 410 / Gdud]",
+      "materialId": "000000006",
       "unitsToExpand": [
+        2,
+        20,
+        110,
         410
       ]
     }

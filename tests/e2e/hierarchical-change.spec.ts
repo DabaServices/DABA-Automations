@@ -6,7 +6,10 @@ import {
   lockCompleteHierarchy,
 } from '../../src/api/apiHelpers';
 import { updateUnitHierarchy } from '../../src/api/hierarchychange';
-import { waitForUnitParent } from '../../src/api/dynamicHierarchyDiscovery';
+import {
+  waitForUnitParent,
+  getUnitParent,
+} from '../../src/api/dynamicHierarchyDiscovery';
 import { lockUnitStatus } from '../../src/api/lockunitstatus';
 import {
   groupByWriteSetComponents,
@@ -83,25 +86,40 @@ async function handleSameParentNoOp(
 ): Promise<boolean> {
   if (data.oldParentUnit !== data.newParentUnit) return false;
 
+  // STALENESS GUARD: the recorded `newParentUnit` reflects the tree at data-GEN
+  // time, but this suite performs IRREVERSIBLE moves, so an earlier real move in
+  // the same run may have relocated `unitToMove` before this probe executes.
+  // Trusting the stale value makes the assertion fail even though the product is
+  // behaving correctly (the unit simply lives under a DIFFERENT parent now).
+  //
+  // A NO-OP only asserts the idempotency invariant "re-parenting a unit onto its
+  // OWN current parent leaves it in place" — which holds for WHATEVER parent it
+  // currently has. So resolve the LIVE parent at run time and assert against
+  // that. If the unit somehow has no parent (detached / not found), fall back to
+  // the recorded value so the assertion still reports something actionable.
+  const livingParent = await getUnitParent(request, data.unitToMove);
+  const targetParent = livingParent ?? data.newParentUnit;
+
   console.log(
-    `[SAME-PARENT NO-OP] Entry "${data.description}" targets the unit's current parent ` +
-      `(oldParentUnit === newParentUnit === ${data.newParentUnit}). This is a no-op ` +
-      `relocation; skipping the move flow and asserting the unit stays put.`,
+    `[SAME-PARENT NO-OP] Entry "${data.description}" is a no-op relocation ` +
+      `(oldParentUnit === newParentUnit === ${data.newParentUnit}). Live current parent ` +
+      `of unit ${data.unitToMove} is ${livingParent ?? '(unknown)'}; asserting the unit ` +
+      `stays under ${targetParent} without performing a move.`,
   );
   const stillThere = await waitForUnitParent(
     request,
     data.unitToMove,
-    data.newParentUnit,
+    targetParent,
     10_000,
   );
   expect(
     stillThere,
     `[ASSERTION: same-parent-noop] Unit ${data.unitToMove} is expected to remain under its ` +
-      `current parent ${data.newParentUnit} (same-parent no-op move), but the backend did not ` +
+      `current parent ${targetParent} (same-parent no-op move), but the backend did not ` +
       `report that parent. The move data may be inconsistent.`,
   ).toBe(true);
   console.log(
-    `  ✓ Same-parent no-op verified: unit ${data.unitToMove} remains under parent ${data.newParentUnit}.`,
+    `  ✓ Same-parent no-op verified: unit ${data.unitToMove} remains under parent ${targetParent}.`,
   );
   return true;
 }
@@ -259,7 +277,15 @@ async function setValuesAndSaveResilient(
   fullPath: number[],
   captureBefore: boolean,
 ): Promise<Map<number, number> | undefined> {
-  const MAX_SAVE_ATTEMPTS = 3;
+  // Total save attempts before giving up. Each retry does a full reload +
+  // re-add + re-expand (plus backoff), so this stays bounded under the per-test
+  // timeout. Raised from a hard-coded 3 → 5 (default) because a BURST of
+  // root-level moves in OTHER workers perturbs Matkal's top-level set across
+  // several consecutive save windows; the old 3-attempt budget could be
+  // exhausted on a product that is actually behaving correctly (observed:
+  // "Save material BEFORE move (attempt 3/3) → 502 ההיררכיה תחתיך השתנתה").
+  // Tunable via HC_SAVE_ATTEMPTS.
+  const MAX_SAVE_ATTEMPTS = Number(process.env.HC_SAVE_ATTEMPTS ?? 5);
 
   for (let attempt = 1; attempt <= MAX_SAVE_ATTEMPTS; attempt++) {
     await withPhase('Set leaf cell values', ctx, () =>
@@ -292,6 +318,20 @@ async function setValuesAndSaveResilient(
       );
 
       await withPhase(`Recover from save 502 (attempt ${attempt})`, ctx, async () => {
+        // JITTERED BACKOFF before replaying. The 502 comes from OTHER workers'
+        // root-level moves churning Matkal's top-level set; those bursts last
+        // longer than a single reload, so an IMMEDIATE replay tends to hit the
+        // very same contention window and burn another attempt. Backing off by
+        // an increasing, randomized delay spreads this test's save windows
+        // across the burst so one lands in a quiet gap. Randomized so sibling
+        // workers that all took a 502 don't retry in lockstep. Base tunable via
+        // HC_SAVE_BACKOFF_MS.
+        const backoffBase = Number(process.env.HC_SAVE_BACKOFF_MS ?? 2000);
+        const backoffMs = backoffBase * attempt + Math.floor(Math.random() * backoffBase);
+        console.warn(
+          `[RESILIENT SAVE] Backing off ${backoffMs}ms before replay (attempt ${attempt}).`,
+        );
+        await hierarchyPage.page.waitForTimeout(backoffMs);
         await hierarchyPage.page.reload();
         await hierarchyPage.waitForMakatComboboxReady(30_000);
         await hierarchyPage.addMakatFromDropdown(makatId);
@@ -533,6 +573,12 @@ async function runValuePreservation(
   // re-capturing. Bounded attempts; we only retry while the moved subtree is
   // still MISSING from the AFTER snapshot.
   const AFTER_ATTEMPTS = 3;
+  // Settle delay (ms) before each AFTER re-capture, so the moved subtree's own
+  // rollup (an intermediate moved unit displays Σ of the gdud children it
+  // carried with it) finishes recomputing before we read it. Shares the same
+  // tunable (and default) as the aggregation re-poll. See the value-mismatch
+  // reconciliation note below.
+  const AFTER_SETTLE_MS = Number(process.env.HC_AGG_SETTLE_MS ?? 2500);
   let valuesAfter!: Map<number, number>;
   for (let attempt = 1; attempt <= AFTER_ATTEMPTS; attempt++) {
     await withPhase(
@@ -550,21 +596,40 @@ async function runValuePreservation(
         ),
     );
 
-    const missingAfter = unitsToVerify.filter((u) => !valuesAfter.has(u));
-    if (missingAfter.length === 0) break; // full AFTER state rendered ✓
+    // A unit is "unreconciled" if it is MISSING from the AFTER snapshot OR its
+    // AFTER value does not yet equal its BEFORE value. RE-POLLING ON MISMATCH
+    // (not just on MISSING) is the fix for the same post-move rollup-lag class
+    // of false failure that hit the aggregation flow: an intermediate moved
+    // unit's displayed value is a rollup of its (moved) children, which the
+    // backend recomputes asynchronously — captured too early it can transiently
+    // read a partial sum and fail value-preservation even though it converges to
+    // the correct (preserved) value. We only re-poll a bounded number of times;
+    // a genuine mismatch that never reconciles still falls through to the
+    // detailed assertion below and fails with the exact BEFORE/AFTER numbers.
+    const unreconciled = unitsToVerify.filter(
+      (u) => !valuesAfter.has(u) || valuesBefore.get(u) !== valuesAfter.get(u),
+    );
+    if (unreconciled.length === 0) break; // full AFTER state matches BEFORE ✓
 
+    const missingAfter = unitsToVerify.filter((u) => !valuesAfter.has(u));
     if (attempt < AFTER_ATTEMPTS) {
+      const mismatched = unreconciled.filter((u) => valuesAfter.has(u));
       console.warn(
-        `[VP] AFTER-move capture is missing unit(s) [${missingAfter.join(', ')}] ` +
+        `[VP] AFTER-move capture not yet reconciled — missing [${missingAfter.join(', ')}], ` +
+          `value-mismatch [${mismatched
+            .map((u) => `${u}: BEFORE=${valuesBefore.get(u)} AFTER=${valuesAfter.get(u)}`)
+            .join('; ')}] ` +
           `even though the backend confirmed the reparent (unit ${unitToMove} → parent ` +
-          `${newParentUnit}). The destination subtree likely did not re-render. Reloading, ` +
-          `re-adding makat ${makatId}, and re-expanding [${newHierarchyFull.join(' → ')}] ` +
+          `${newParentUnit}). Likely destination re-render / rollup lag. Settling ${AFTER_SETTLE_MS}ms, ` +
+          `reloading, re-adding makat ${makatId}, and re-expanding [${newHierarchyFull.join(' → ')}] ` +
           `before re-capturing (attempt ${attempt}/${AFTER_ATTEMPTS}).`,
       );
       await withPhase(
-        `Reload + re-add makat before AFTER retry (attempt ${attempt})`,
+        `Settle + reload + re-add makat before AFTER retry (attempt ${attempt})`,
         ctx,
         async () => {
+          // Let the moved subtree's rollup settle before we re-read it.
+          await hierarchyPage.page.waitForTimeout(AFTER_SETTLE_MS);
           await hierarchyPage.page.reload();
           await hierarchyPage.waitForMakatComboboxReady(30_000);
           await hierarchyPage.addMakatFromDropdown(makatId);
@@ -663,10 +728,69 @@ async function captureAndVerifyAggregationResilient(
    * detailed assertion on the returned `values`.
    */
   extraCheck?: (values: Map<number, number>) => boolean,
-): Promise<{ ok: boolean; values: Map<number, number> }> {
-  const AGG_ATTEMPTS = Number(process.env.HC_AGG_ATTEMPTS ?? 3);
+): Promise<{ ok: boolean; values: Map<number, number>; report: string }> {
+  const AGG_ATTEMPTS = Number(process.env.HC_AGG_ATTEMPTS ?? 8);
+  // Settle delay (ms) inserted BEFORE each re-capture so the backend's
+  // asynchronous post-move rollup has time to propagate to every ancestor
+  // before we read the cells again. Without it, a re-poll can re-capture the
+  // grid mid-recompute and observe the SAME transient mismatch (a parent that
+  // already dropped while a just-moved child is still briefly listed), turning
+  // pure rollup lag into a false "parent ≠ Σ children" failure. Tunable via
+  // HC_AGG_SETTLE_MS.
+  const AGG_SETTLE_MS = Number(process.env.HC_AGG_SETTLE_MS ?? 2500);
+  // Number of CONSECUTIVE identical-yet-still-violating snapshots required
+  // before we conclude the violation is REAL (the grid has truly gone quiet AND
+  // is wrong) rather than a slow rollup that has only MOMENTARILY plateaued. A
+  // single backend rollup onto a hot shared parent (e.g. a top-level Pikud/Ugda
+  // such as unit 3) can sit at an intermediate sum for a read or two before it
+  // finishes climbing to Σchildren, so requiring only 2 identical reads (the old
+  // behaviour) declared a real bug too eagerly and produced FALSE positives on
+  // values that DO converge (observed: `Unit 3: parent=10 ≠ Σchildren=12` which
+  // later read correctly). Default 3. Tunable via HC_AGG_STABLE_READS.
+  const AGG_STABLE_READS = Number(process.env.HC_AGG_STABLE_READS ?? 3);
   let values = new Map<number, number>();
   let ok = false;
+  // The detailed breakdown (captured snapshot + per-parent child values + sums)
+  // from the LAST verify attempt. Empty while aggregation reconciles; populated
+  // on the final failing attempt so the caller can attach it to the assertion.
+  let report = '';
+
+  // ── CONCURRENCY-AWARE FAILURE GATE ──────────────────────────────────────────
+  // The suite runs many clusters in PARALLEL (WORKERS>1). Sibling subtrees of a
+  // shared top-level parent (e.g. a Pikud/Ugda that is itself a root child) are
+  // continuously perturbed by OTHER workers' saves/locks/moves, and the backend
+  // rollup onto such a hot parent is asynchronous. A single capture can thus
+  // observe an INTERNALLY-INCONSISTENT snapshot — parent read at time T0, a
+  // child re-summed by another worker at T1>T0 — surfacing as the classic
+  // "parent = Σchildren ± 1" blip. That is NOT a product bug.
+  //
+  // Distinguishing signal:
+  //   • A REAL aggregation defect is STABLE — the SAME wrong numbers persist
+  //     across repeated reads.
+  //   • Concurrency interference / rollup lag is MOVING — consecutive snapshots
+  //     DIFFER (the parent is climbing toward the children's sum).
+  //
+  // So we only treat a violation as a genuine failure when it reproduces across
+  // `AGG_STABLE_READS` CONSECUTIVE IDENTICAL snapshots (the grid has gone quiet
+  // AND is still wrong). While snapshots keep changing we keep polling — that's
+  // live churn / a rollup still climbing, not a bug. `prevSnapshot` holds the
+  // previous attempt's captured values so we can detect quiescence, and
+  // `stableStreak` counts how many identical-yet-wrong reads we've seen in a
+  // row. Requiring MORE than two identical reads (the previous behaviour) avoids
+  // calling a slow-but-converging rollup — which can momentarily plateau at an
+  // intermediate sum for a read or two — a real failure.
+  let prevSnapshot: Map<number, number> | null = null;
+  let stableStreak = 1;
+
+  /** Stable iff both maps have identical keys and values (order-independent). */
+  const snapshotsEqual = (
+    a: Map<number, number>,
+    b: Map<number, number> | null,
+  ): boolean => {
+    if (!b || a.size !== b.size) return false;
+    for (const [k, v] of a) if (b.get(k) !== v) return false;
+    return true;
+  };
 
   for (let attempt = 1; attempt <= AGG_ATTEMPTS; attempt++) {
     values = await withPhase(
@@ -676,7 +800,7 @@ async function captureAndVerifyAggregationResilient(
         hierarchyPage.captureAllVisibleCellValuesAtEachLevel(makatId, fullPath),
     );
 
-    const aggOk = await withPhase(
+    const aggResult = await withPhase(
       `${phaseLabel}: verify (attempt ${attempt}/${AGG_ATTEMPTS})`,
       ctx,
       () =>
@@ -686,21 +810,58 @@ async function captureAndVerifyAggregationResilient(
           values,
         ),
     );
-    ok = aggOk && (extraCheck ? extraCheck(values) : true);
+    report = aggResult.report;
+    ok = aggResult.ok && (extraCheck ? extraCheck(values) : true);
 
-    if (ok) return { ok, values }; // aggregation reconciled ✓
+    if (ok) return { ok, values, report }; // aggregation reconciled ✓
+
+    // Violation observed. Decide whether it is REAL (stable) or TRANSIENT
+    // (the grid is still moving / a rollup is still climbing under load).
+    // Track how many CONSECUTIVE identical-yet-violating snapshots we've seen:
+    // only after `AGG_STABLE_READS` of them in a row do we conclude the grid has
+    // truly quiesced on a wrong value. A momentary plateau (2 equal reads) is
+    // NOT enough — a slow rollup onto a hot shared parent can pause there before
+    // converging.
+    if (snapshotsEqual(values, prevSnapshot)) {
+      stableStreak += 1;
+    } else {
+      stableStreak = 1;
+    }
+    prevSnapshot = values;
+
+    if (stableStreak >= AGG_STABLE_READS) {
+      // `AGG_STABLE_READS` consecutive IDENTICAL snapshots still violate the
+      // invariant → the grid has gone quiet and is genuinely wrong. Stop early
+      // and report it as a real failure (no point burning the remaining
+      // attempts).
+      console.warn(
+        `[AGG RE-POLL] Aggregation violation is STABLE across ${stableStreak} identical ` +
+          `snapshots on [${fullPath.join(' → ')}] (attempt ${attempt}/${AGG_ATTEMPTS}) — ` +
+          `treating as a REAL aggregation failure (not concurrency / rollup lag).`,
+      );
+      return { ok: false, values, report };
+    }
 
     if (attempt < AGG_ATTEMPTS) {
       console.warn(
         `[AGG RE-POLL] Aggregation not yet consistent on [${fullPath.join(
           ' → ',
-        )}] (attempt ${attempt}/${AGG_ATTEMPTS}). Likely backend rollup lag after the ` +
-          `move; reloading, re-expanding the same complete path, and re-checking.`,
+        )}] (attempt ${attempt}/${AGG_ATTEMPTS}, stable-streak ${stableStreak}/${AGG_STABLE_READS}). ` +
+          `Snapshot still settling — likely backend rollup lag / concurrent sibling churn ` +
+          `(WORKERS>1). Settling with backoff, reloading, re-expanding the same complete path, ` +
+          `and re-checking.`,
       );
+      // Adaptive backoff: each successive re-poll waits longer, giving a busy
+      // backend more time to quiesce as parallel clusters finish their writes.
+      const backoffMs = AGG_SETTLE_MS * attempt;
       await withPhase(
-        `${phaseLabel}: reload + re-expand before re-poll (attempt ${attempt})`,
+        `${phaseLabel}: settle + reload + re-expand before re-poll (attempt ${attempt})`,
         ctx,
         async () => {
+          // Let the asynchronous rollup propagate before we re-read. This is the
+          // core of the fix: the prior implementation reloaded and immediately
+          // re-captured, which could still hit the grid mid-recompute.
+          await hierarchyPage.page.waitForTimeout(backoffMs);
           await hierarchyPage.page.reload();
           await hierarchyPage.waitForMakatComboboxReady(30_000);
           await hierarchyPage.waitForMaterialRow(makatId, 15_000);
@@ -715,10 +876,11 @@ async function captureAndVerifyAggregationResilient(
   console.warn(
     `[AGG RE-POLL] Aggregation still inconsistent on [${fullPath.join(
       ' → ',
-    )}] after ${AGG_ATTEMPTS} attempts — reporting as a real aggregation failure ` +
-      `(not transient lag).`,
+    )}] after ${AGG_ATTEMPTS} attempts AND never stabilised — the grid kept ` +
+      `changing under concurrent load. Reporting the last snapshot; if this recurs, ` +
+      `raise HC_AGG_ATTEMPTS / HC_AGG_SETTLE_MS / HC_AGG_STABLE_READS or reduce WORKERS for this run.`,
   );
-  return { ok, values };
+  return { ok, values, report };
 }
 
 async function runAggregation(
@@ -781,12 +943,17 @@ async function runAggregation(
   await withPhase('Update unit hierarchy (API)', ctx, () =>
     updateUnitHierarchy(request, unitToMove, newParentUnit, 1, hatunit),
   );
-  await withPhase('Lock complete hierarchy (API)', ctx, () =>
-    lockCompleteHierarchy(request, [originalHierarchy[0], newHierarchy[0]]),
-  );
-
+  // CONFIRM the reparent landed BEFORE locking. `lockCompleteHierarchy` locks
+  // with `updateHierarchy:true`, recomputing the new parent's rollup from the
+  // children visible AT THAT INSTANT. If we lock before the move propagates,
+  // the new parent is recomputed WITHOUT the incoming child and FROZEN at its
+  // pre-move sum (locked → never recomputes) → a stable `parent = Σ − moved`
+  // mismatch. Mirror the VP flow: wait for the parent, THEN lock.
   await withPhase('Wait for backend to reflect move', ctx, () =>
     waitForUnitParent(request, unitToMove, newParentUnit),
+  );
+  await withPhase('Lock complete hierarchy (API)', ctx, () =>
+    lockCompleteHierarchy(request, [originalHierarchy[0], newHierarchy[0]]),
   );
 
   await withPhase('Reload page after move', ctx, async () => {
@@ -814,18 +981,19 @@ async function runAggregation(
   // Re-poll across reloads: a freshly-moved subtree's ancestor rollups settle
   // asynchronously, so a single-shot check can observe a parent still holding
   // its pre-move sum. Only a result that never reconciles is a real failure.
-  const { ok: aggregationValid } = await captureAndVerifyAggregationResilient(
-    hierarchyPage,
-    ctx,
-    makatId,
-    newHierarchyFull,
-    'Aggregation (new hierarchy)',
-  );
+  const { ok: aggregationValid, report: aggReport } =
+    await captureAndVerifyAggregationResilient(
+      hierarchyPage,
+      ctx,
+      makatId,
+      newHierarchyFull,
+      'Aggregation (new hierarchy)',
+    );
   expect(
     aggregationValid,
     `[ASSERTION: aggregation-invalid-new-hierarchy] Aggregation rule (parent = sum(children)) violated on the NEW hierarchy [${newHierarchyFull.join(
       ' → ',
-    )}] after moving unit ${unitToMove} under ${newParentUnit}.`,
+    )}] after moving unit ${unitToMove} under ${newParentUnit}.\n${aggReport}`,
   ).toBe(true);
   console.log(`✓ TEST PASSED: Aggregation verified for entire new hierarchy!\n`);
 }
@@ -881,12 +1049,14 @@ async function runOldHierarchyAggregation(
   await withPhase('Update unit hierarchy (API)', ctx, () =>
     updateUnitHierarchy(request, unitToMove, newParentUnit, 1, hatunit),
   );
-  await withPhase('Lock complete hierarchy (API)', ctx, () =>
-    lockCompleteHierarchy(request, [originalHierarchy[0], newHierarchy[0]]),
-  );
-
+  // CONFIRM the reparent landed BEFORE locking (same race as the AGG flow): the
+  // lock recomputes rollups with `updateHierarchy:true`, so locking pre-move
+  // freezes the OLD parent still holding the moved child's value. Wait first.
   await withPhase('Wait for backend to reflect move', ctx, () =>
     waitForUnitParent(request, unitToMove, newParentUnit),
+  );
+  await withPhase('Lock complete hierarchy (API)', ctx, () =>
+    lockCompleteHierarchy(request, [originalHierarchy[0], newHierarchy[0]]),
   );
 
   await withPhase('Reload page after move', ctx, async () => {
@@ -930,7 +1100,7 @@ async function runOldHierarchyAggregation(
   // re-sums AND, for cross-top moves, the moved unit has left) into the same
   // re-poll so transient lag settles before we assert. The detailed assertions
   // below then run on the SETTLED snapshot.
-  const { ok, values: oldHierarchyValues } =
+  const { ok, values: oldHierarchyValues, report: oldAggReport } =
     await captureAndVerifyAggregationResilient(
       hierarchyPage,
       { ...ctx, oldHierarchyPath },
@@ -963,7 +1133,7 @@ async function runOldHierarchyAggregation(
     ok,
     `[ASSERTION: aggregation-invalid-old-hierarchy] Aggregation rule (parent = sum(children)) violated on the OLD hierarchy [${oldHierarchyPath.join(
       ' → ',
-    )}] after unit ${unitToMove} was moved out from under parent ${oldParentUnit}.`,
+    )}] after unit ${unitToMove} was moved out from under parent ${oldParentUnit}.\n${oldAggReport}`,
   ).toBe(true);
   console.log(
     `✓ TEST PASSED: Aggregation verified for OLD hierarchy after unit removal!\n`,

@@ -23,6 +23,21 @@ const BACKEND_HOST = (() => {
 })();
 
 /**
+ * Result of {@link ShechelPage.verifyAggregationWithAllVisibleCells}.
+ *
+ * `ok` is the pass/fail flag (kept so existing boolean checks still read
+ * naturally). `report` is a multi-line, human-readable breakdown that is EMPTY
+ * on success and, on failure, lists the full captured snapshot plus — for every
+ * violating parent — the exact child units (gdudim/leaves) with their values,
+ * the computed Σ, the parent value and the signed difference. Callers append
+ * `report` to the thrown assertion so the error log alone is enough to debug.
+ */
+export interface AggregationCheckResult {
+  ok: boolean;
+  report: string;
+}
+
+/**
  * ShechelPage - Extends {@link MainPage} with workflow-specific logic for the
  * Shechel / Mlai screens: hierarchy expansion, leaf cell editing, aggregation
  * verification, hierarchy unit moves, and per-row comment dialogs.
@@ -512,7 +527,7 @@ export class ShechelPage extends MainPage {
 
       // Make sure the cell is in view, then hover to reveal the network button.
       //
-      // Two transient conditions broke this in the hierarchy-change tests and
+      // Three transient conditions broke this in the hierarchy-change tests and
       // are handled here:
       //   1. The `AmmoLoading` overlay (aria-busy) intercepts pointer events,
       //      so the hover times out and the network button never appears
@@ -521,12 +536,21 @@ export class ShechelPage extends MainPage {
       //   2. The cell can detach from the DOM mid-hover while the grid
       //      re-renders ("Element is not attached to the DOM"). Re-resolve the
       //      cell and retry a couple of times instead of giving up.
+      //   3. Under a SATURATED backend the grid keeps re-laying-out, so a fixed
+      //      2 000 ms `scrollIntoViewIfNeeded`/`hover` times out even though the
+      //      cell is present and on-screen — this is exactly what made the
+      //      Gdud(810) BEFORE-capture abort ("Could not hover cell for unit
+      //      210 … scrollIntoViewIfNeeded: Timeout 2000ms exceeded"). The
+      //      per-attempt timeout therefore GROWS (2s → 4s → 6s) and we settle
+      //      the loading overlay between tries, giving a laggy layout room to
+      //      quiesce before we conclude the network button is unreachable.
       const HOVER_ATTEMPTS = 3;
       for (let h = 0; h < HOVER_ATTEMPTS; h++) {
         await this.waitForAmmoLoadingGone();
+        const hoverTimeout = 2000 * (h + 1); // 2s, 4s, 6s — absorbs backend lag
         try {
-          await cell.first().scrollIntoViewIfNeeded({ timeout: 2000 });
-          await cell.first().hover({ timeout: 2000 });
+          await cell.first().scrollIntoViewIfNeeded({ timeout: hoverTimeout });
+          await cell.first().hover({ timeout: hoverTimeout });
           break;
         } catch (e) {
           if (h === HOVER_ATTEMPTS - 1) {
@@ -544,7 +568,36 @@ export class ShechelPage extends MainPage {
       }
 
       const networkBtn = this.networkButton(materialId, unitId);
-      const btnVisible = await networkBtn.isVisible({ timeout: 1500 }).catch(() => false);
+      let btnVisible = await networkBtn.isVisible({ timeout: 1500 }).catch(() => false);
+
+      // For a NON-leaf unit the network button MUST appear for the expand to
+      // continue. Under a saturated backend the hover above can land just as
+      // the grid re-lays-out, so the button hasn't painted within the first
+      // 1 500 ms probe — which previously aborted the whole (irreversible)
+      // BEFORE-capture with "Network button not visible for unit 210 — cannot
+      // continue". Before giving up, re-settle the overlay, re-hover, and
+      // re-probe a couple of times with a growing window. (Leaf units skip
+      // this: their missing button is the expected end-of-path signal handled
+      // below.)
+      if (!btnVisible && i !== unitsToExpand.length - 1) {
+        const REHOVER_ATTEMPTS = 2;
+        for (let rh = 0; rh < REHOVER_ATTEMPTS && !btnVisible; rh++) {
+          await this.waitForAmmoLoadingGone();
+          cell = this.cellForUnit(materialId, unitId);
+          await cell
+            .first()
+            .hover({ timeout: 3000 })
+            .catch(() => undefined);
+          btnVisible = await networkBtn
+            .isVisible({ timeout: 2500 })
+            .catch(() => false);
+          if (btnVisible) {
+            console.info(
+              `[expandHierarchyToLeaf] Network button for unit ${unitId} appeared after re-hover ${rh + 1}/${REHOVER_ATTEMPTS}.`,
+            );
+          }
+        }
+      }
 
       if (!btnVisible) {
         // If this is the leaf in the requested path, that's expected.
@@ -1236,11 +1289,32 @@ export class ShechelPage extends MainPage {
     _materialId: string,
     unitsToExpand: number[],
     allVisibleValues: Map<number, number>
-  ): Promise<boolean> {
+  ): Promise<AggregationCheckResult> {
     const hierarchyMap = this._hierarchyMap;
     let allChecksPass = true;
 
     console.log(`\n[AGGREGATION VERIFICATION]`);
+
+    // ── Full snapshot of every captured cell (unit → value) ───────────────
+    // Print the complete list of all units that hold a value (the gdudim/
+    // leaves and every parent we captured), sorted by unit id, so the entire
+    // calculation is auditable at a glance — you can see exactly which units
+    // and values feed into each parent's aggregated total below.
+    const capturedEntries = [...allVisibleValues.entries()].sort(
+      (a, b) => a[0] - b[0],
+    );
+    const capturedLine =
+      `[ALL CAPTURED VALUES] ${capturedEntries.length} cell(s): ${capturedEntries
+        .map(([unitId, value]) => `${unitId}=${value}`)
+        .join(', ')}`;
+    console.log(`  ${capturedLine}`);
+
+    // Collect a detailed, human-readable breakdown of every FAILING parent so
+    // the thrown assertion can carry the exact child units + values + sum that
+    // violated the rule — enough to debug from the report alone, without
+    // re-running. Each entry lists every child (gdud/leaf) with its value, the
+    // computed Σ, the parent's own value, and the signed difference.
+    const failureReports: string[] = [];
 
     for (const parentUnitId of unitsToExpand) {
       const hasParent = allVisibleValues.has(parentUnitId);
@@ -1249,13 +1323,26 @@ export class ShechelPage extends MainPage {
 
       if (children.length === 0) continue;
 
+      // Build the per-child value breakdown ONCE so it feeds both the console
+      // line and the failure report. A child absent from the snapshot is shown
+      // as `MISSING` rather than silently skipped, so a missing cell is never
+      // mistaken for a real zero.
+      const childBreakdown = children
+        .map((c) => `${c}=${allVisibleValues.has(c) ? allVisibleValues.get(c) : 'MISSING'}`)
+        .join(', ');
+
       // If the parent cell isn't in the captured snapshot it means the
       // unit was not rendered when we ran the capture — treat as a clear
       // failure rather than silently using 0, which would mask the real
       // problem behind a confusing "0 ≠ sum" message.
       if (!hasParent) {
         console.log(
-          `  ✗ Unit ${parentUnitId}: MISSING from captured snapshot — cannot verify aggregation`,
+          `  ✗ Unit ${parentUnitId}: MISSING from captured snapshot — cannot verify aggregation` +
+            `  ← children (${children.length}): [${childBreakdown}]`,
+        );
+        failureReports.push(
+          `Unit ${parentUnitId}: PARENT cell MISSING from captured snapshot — cannot verify ` +
+            `aggregation. Children (${children.length}) with values: [${childBreakdown}]`,
         );
         allChecksPass = false;
         continue;
@@ -1273,7 +1360,12 @@ export class ShechelPage extends MainPage {
 
       if (missingChild !== null) {
         console.log(
-          `  ✗ Unit ${parentUnitId}: child ${missingChild} MISSING from captured snapshot — cannot verify aggregation`,
+          `  ✗ Unit ${parentUnitId}: child ${missingChild} MISSING from captured snapshot — cannot verify aggregation` +
+            `  ← children (${children.length}): [${childBreakdown}]`,
+        );
+        failureReports.push(
+          `Unit ${parentUnitId} (parent=${parentValue}): child ${missingChild} MISSING from captured ` +
+            `snapshot — cannot verify aggregation. Children (${children.length}) with values: [${childBreakdown}]`,
         );
         allChecksPass = false;
         continue;
@@ -1281,12 +1373,32 @@ export class ShechelPage extends MainPage {
 
       const isPassed = parentValue === childrenSum;
       const status = isPassed ? '✓' : '✗';
-      console.log(`  ${status} Unit ${parentUnitId}: ${parentValue} ${isPassed ? '===' : '≠'} ${childrenSum}`);
+      // Always log the full child breakdown (even on PASS) so the surrounding
+      // gdud/leaf context is visible when an adjacent parent fails.
+      console.log(
+        `  ${status} Unit ${parentUnitId}: parent=${parentValue} ${isPassed ? '===' : '≠'} Σchildren=${childrenSum}` +
+          `  ← children (${children.length}): [${childBreakdown}]`,
+      );
 
-      if (!isPassed) allChecksPass = false;
+      if (!isPassed) {
+        const diff = childrenSum - (parentValue ?? 0);
+        failureReports.push(
+          `Unit ${parentUnitId}: parent=${parentValue} ≠ Σchildren=${childrenSum} ` +
+            `(diff ${diff > 0 ? '+' : ''}${diff}). Children (${children.length}) with values: [${childBreakdown}]`,
+        );
+        allChecksPass = false;
+      }
     }
 
-    return allChecksPass;
+    // The report is only populated on failure: the full captured snapshot
+    // followed by one detailed line per violating parent. Callers append it to
+    // the assertion message so the error log alone shows every unit + value +
+    // sum (the list of gdudim with values) needed to debug.
+    const report = allChecksPass
+      ? ''
+      : [`  ${capturedLine}`, ...failureReports.map((r) => `  ✗ ${r}`)].join('\n');
+
+    return { ok: allChecksPass, report };
   }
 
   // ──────────────── Comments ────────────────

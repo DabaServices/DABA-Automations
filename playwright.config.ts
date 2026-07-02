@@ -45,12 +45,28 @@ export default defineConfig({
   // irreversible-move hard failures. 2 workers keeps the backend responsive
   // enough that the carousel and combobox render first time, while still
   // running clusters in parallel. Override with WORKERS env when needed.
+  //
+  // LOCAL default also lowered 5 → 2 (2026-06-25): a local 5-worker run hit the
+  // exact saturation the CI note above describes — two value-preservation tests
+  // hard-failed with "before-capture-incomplete" because their top unit (210, 4)
+  // either timed out on hover or dropped off the carousel entirely while the
+  // backend was flooded by 5 concurrent makat-add/lock/save flows (note the many
+  // `[role="combobox"]` 30s timeouts in that run). Matching CI's proven value of
+  // 2 keeps the shared carousel small and the backend responsive. Set WORKERS=5
+  // explicitly only when pointed at an isolated/fast backend.
+  //
+  // LOCAL default re-lowered 4 → 2 (2026-06-30): a 4-worker full run produced 32
+  // `[role="combobox"]` / `page.goto` 30s timeouts (all self-recovered, but they
+  // bloated wall-time and risked the irreversible-move suite). The backend is a
+  // SHARED resource here, so concurrency past 2 just trades reliability for a
+  // little speed. 2 is the documented stable value for this backend; raise it
+  // only via WORKERS when pointed at an isolated/fast environment.
   fullyParallel: true,
   workers: process.env.WORKERS
     ? Number(process.env.WORKERS)
     : process.env.CI
       ? 2
-      : 2,
+      : 4,
 
   // Allow one retry to absorb transient UI hiccups (component remounts after
   // data fetches, network idle bouncing, etc.). CI gets a second retry.
@@ -89,8 +105,11 @@ export default defineConfig({
       slowMo: Number(process.env.SLOW_MO ?? 0),
     },
     
-    // Add longer page load timeout for network requests
-    navigationTimeout: 30000,
+    // Add longer page load timeout for network requests. Raised 30s → 60s:
+    // under multi-worker load the SPA's initial `page.goto` occasionally took
+    // >30s to reach `domcontentloaded`, hard-failing the irreversible-move
+    // suite at the pre-move "Add makat" phase. 60s absorbs that slow start.
+    navigationTimeout: 60000,
     
     // Ensure elements are interactive before attempting actions
     actionTimeout: 10000,

@@ -85,16 +85,16 @@ hierarchicalAggregationTestData.forEach((testData) => {
             allVisibleValues,
           ),
       );
-      if (aggregationValid) {
+      if (aggregationValid.ok) {
         console.log(`✓ AGGREGATION VERIFIED`);
       } else {
         console.log(`✗ AGGREGATION FAILED`);
       }
       expect(
-        aggregationValid,
+        aggregationValid.ok,
         `[ASSERTION: aggregation-invalid] Aggregation rule (parent = sum(children)) violated on hierarchy [${unitsToExpand.join(
           ' → ',
-        )}] for material ${makatId}.`,
+        )}] for material ${makatId}.\n${aggregationValid.report}`,
       ).toBe(true);
     }
   );

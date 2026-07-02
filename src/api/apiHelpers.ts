@@ -275,34 +275,90 @@ export const unlockCompleteHierarchy = async (
     if (!seen.has(u)) { seen.add(u); unlockOrder.push(u); }
   }
 
+  // TRANSIENT "unit still locked" recovery ──────────────────────────────────
+  // In this product a SAVE is really "lock + aggregation recompute", so the
+  // just-saved units stay in a locked / processing state for a short, backend-
+  // dependent window AFTER the save response lands (see ShechelPage.saveMaterial,
+  // which mitigates it with a fixed `SAVE_SETTLE_MS` wait). The move flows call
+  // this unlock IMMEDIATELY after that save, so on a slow backend the recompute
+  // may not be finished yet and the unlock comes back as:
+  //   HTTP 400 {"message":"יחידת המסך נעולה, אין אפשרות לבצע את הפעולה"}
+  //   ("the screen unit is locked, action not allowed").
+  // That is NOT a permanent client error — the unit becomes unlockable once the
+  // recompute settles. A fixed pre-wait can only ever race a variable backend,
+  // so instead we RETRY this specific transient per-unit for a bounded window:
+  // fast when the backend is quick, patient when it is slow. Tunable via env.
+  const UNIT_LOCKED_MARKER = 'נעולה'; // "locked" (Hebrew) — present in the 400 body
+  const isUnitStillLocked = (error: unknown): boolean =>
+    error instanceof ClientError &&
+    error.status === 400 &&
+    typeof error.message === 'string' &&
+    error.message.includes(UNIT_LOCKED_MARKER);
+  const LOCKED_RETRY_ATTEMPTS = Number(process.env.UNLOCK_LOCKED_RETRIES ?? 8);
+  const LOCKED_RETRY_INTERVAL_MS = Number(
+    process.env.UNLOCK_LOCKED_INTERVAL_MS ?? 1000,
+  );
+
   // Collect genuine unlock failures so we can report them ALL at once and
   // fail fast, rather than swallowing them and failing later in the move.
   const unlockFailures: string[] = [];
   for (const unitId of unlockOrder) {
     const fatherId = unitToFather.get(unitId)!;
-    try {
-      await lockUnitStatus(request, [unitId], fatherId, 0);
-    } catch (error) {
-      // Unlock is a HARD PRECONDITION for the move that follows. If it
-      // genuinely fails, the move will fail later as a confusing symptom
-      // ("move not persisted" / "unit locked"), so we must NOT silently
-      // swallow it.
-      //
-      // EXCEPTION: an "already in desired state" conflict (409/422) means the
-      // unit is already unlocked — that's a soft success, so we tolerate it.
-      if (
-        error instanceof ClientError &&
-        (error.status === 409 || error.status === 422)
-      ) {
-        console.info(
-          `[unlockCompleteHierarchy] Unit ${unitId} (father ${fatherId}) returned HTTP ${error.status} — already unlocked, continuing.`,
-        );
-        continue;
+    let lastError: unknown;
+    let resolved = false;
+
+    for (let attempt = 1; attempt <= LOCKED_RETRY_ATTEMPTS; attempt++) {
+      try {
+        await lockUnitStatus(request, [unitId], fatherId, 0);
+        resolved = true; // unlocked ✓
+        break;
+      } catch (error) {
+        lastError = error;
+
+        // Unlock is a HARD PRECONDITION for the move that follows. If it
+        // genuinely fails, the move will fail later as a confusing symptom
+        // ("move not persisted" / "unit locked"), so we must NOT silently
+        // swallow it.
+        //
+        // EXCEPTION 1: an "already in desired state" conflict (409/422) means
+        // the unit is already unlocked — that's a soft success, so we tolerate
+        // it and stop retrying.
+        if (
+          error instanceof ClientError &&
+          (error.status === 409 || error.status === 422)
+        ) {
+          console.info(
+            `[unlockCompleteHierarchy] Unit ${unitId} (father ${fatherId}) returned HTTP ${error.status} — already unlocked, continuing.`,
+          );
+          resolved = true;
+          break;
+        }
+
+        // EXCEPTION 2: the transient post-save "unit still locked" 400. Wait a
+        // beat for the aggregation recompute to settle, then retry the SAME
+        // unit. Only give up (fall through to hard failure) once retries are
+        // exhausted.
+        if (isUnitStillLocked(error) && attempt < LOCKED_RETRY_ATTEMPTS) {
+          console.warn(
+            `[unlockCompleteHierarchy] Unit ${unitId} (father ${fatherId}) still locked ` +
+              `(post-save settling) — attempt ${attempt}/${LOCKED_RETRY_ATTEMPTS}, ` +
+              `retrying in ${LOCKED_RETRY_INTERVAL_MS}ms…`,
+          );
+          await new Promise((r) => setTimeout(r, LOCKED_RETRY_INTERVAL_MS));
+          continue;
+        }
+
+        // Permanent error, or retries exhausted → stop and record below.
+        break;
       }
+    }
+
+    if (!resolved) {
       console.error(
-        `[unlockCompleteHierarchy] Failed to unlock unit ${unitId} (father: ${fatherId}): ${error}`,
+        `[unlockCompleteHierarchy] Failed to unlock unit ${unitId} (father: ${fatherId})` +
+          `${isUnitStillLocked(lastError) ? ` after ${LOCKED_RETRY_ATTEMPTS} attempt(s) — unit remained locked` : ''}: ${lastError}`,
       );
-      unlockFailures.push(`unit ${unitId} (father ${fatherId}): ${error}`);
+      unlockFailures.push(`unit ${unitId} (father ${fatherId}): ${lastError}`);
     }
   }
 

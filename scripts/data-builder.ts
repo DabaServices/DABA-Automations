@@ -30,11 +30,18 @@
  * reservation set, so the two files stay disjoint even when generated
  * separately.
  *
- * MATERIAL ID
- * ───────────
- * For now, every generated entry gets the same default `materialId`
- * ("000000006") in BOTH the REGULAR and HIERARCHY_CHANGE outputs.
- * Future work: add real per-entry materialId allocation logic.
+ * MATERIAL ID (MAKAT) — live-pulled & scattered
+ * ──────────────────────────────────────────────
+ * Makats are fetched LIVE from the backend on every run (`GET /materials/excel`,
+ * via `fetchMakatIds`). The HIERARCHY_CHANGE generator assigns a NEW makat every
+ * `MAKAT_GROUP_SIZE` entries (default 10; override via env), so each "band" of
+ * entries gets its own private value space. Because the parent-uniqueness
+ * reservation is scoped PER MAKAT, two bands can safely reuse the same scarce
+ * Pikud (level-1) parents — which is what lets a full 40-slot array fit inside a
+ * tree that has only 9 Pikuds. REGULAR entries are read-only on aggregations, so
+ * they all keep the single default makat.
+ *
+ * The templates no longer carry a `materialId` — the builder injects it.
  *
  * Run:
  *   npm run build:data              # both modes
@@ -50,6 +57,7 @@ import {
   fetchHierarchyUnits,
   HierarchyUnit,
 } from '../src/api/dynamicHierarchyDiscovery';
+import { fetchMakatIds } from '../src/api/dynamicMaterialDiscovery';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -255,21 +263,60 @@ function isEmergencyEligible(unitId: number, idx: TreeIndex): boolean {
   return true;
 }
 
-// ─── Reservation (global disjoint set) ──────────────────────────────────────
-
+// ─── Reservation (global pin + per-makat parent set) ────────────────────────
+//
+// Two distinct reservation scopes, because they protect against two DIFFERENT
+// hazards:
+//
+//   • `pinned` — GLOBAL across every makat. A unit that some entry MOVES
+//     (HC `unitToMove`) or a gdud a REGULAR entry exercises is pinned so no
+//     other entry can move it. Moving a unit is a STRUCTURAL change to the org
+//     tree shared by ALL makats, so this must never depend on the makat.
+//
+//   • `parentsByMakat` — PER-MAKAT. Two entries may not share an old/new parent
+//     ONLY IF they use the SAME makat: each test sets values for its own makat,
+//     so two children piled under one parent with the SAME makat corrupt that
+//     parent's `Σchildren` for that makat. With DIFFERENT makats the value
+//     spaces are independent, so the SAME scarce parent (e.g. one of the 9
+//     Pikuds) can be safely reused. This is what lets every 10-slot band — each
+//     assigned its own makat — fit inside the live tree.
 class Reservations {
-  /** Every unit ID claimed by any generated/seeded entry, in any role. */
-  claimed = new Set<number>();
+  /** Units pinned by being moved (HC) or exercised (REGULAR) — GLOBAL. */
+  pinned = new Set<number>();
 
-  /** Returns true if proposed claim has zero overlap with current state. */
-  isDisjoint(proposed: Iterable<number>): boolean {
-    for (const id of proposed) if (this.claimed.has(id)) return false;
+  /** Per-makat sets of reserved old/new parents (excludes Matkal root). */
+  parentsByMakat = new Map<string, Set<number>>();
+
+  /** True when `id` is already moved/exercised by some entry (any makat). */
+  isPinned(id: number): boolean {
+    return this.pinned.has(id);
+  }
+
+  /** Pin a unit so no other entry may move/claim it. */
+  pin(id: number): void {
+    this.pinned.add(id);
+  }
+
+  private parentsFor(makat: string): Set<number> {
+    let s = this.parentsByMakat.get(makat);
+    if (!s) {
+      s = new Set<number>();
+      this.parentsByMakat.set(makat, s);
+    }
+    return s;
+  }
+
+  /** True when none of `parents` are already reserved for THIS makat. */
+  parentsAvailable(makat: string, parents: Iterable<number>): boolean {
+    const s = this.parentsFor(makat);
+    for (const p of parents) if (s.has(p)) return false;
     return true;
   }
 
-  /** Add a proposed claim to the global reservation. */
-  commit(proposed: Iterable<number>): void {
-    for (const id of proposed) this.claimed.add(id);
+  /** Reserve `parents` for THIS makat (idempotent). */
+  reserveParents(makat: string, parents: Iterable<number>): void {
+    const s = this.parentsFor(makat);
+    for (const p of parents) s.add(p);
   }
 }
 
@@ -307,7 +354,7 @@ class Reservations {
  * parent to somewhere else, any LATER entry B that has X anywhere on its
  * `unitsToExpand` / `newHierarchy` will fail to find X in its expected
  * location at run time. So we need two disjoint sets, tracked separately
- * from the generic `Reservations.claimed`:
+ * from `Reservations` (which guards moved units + per-makat parents):
  *
  *   • movedUnits — every unit that some HC entry will move.
  *   • pathUnits  — every unit appearing in some entry's persisted paths
@@ -319,9 +366,6 @@ class Reservations {
  *     (otherwise some other test will look for it where it used to be).
  *   • candidate's `unitsToExpand` ∪ `newHierarchy` must NOT intersect
  *     `movedUnits` (otherwise some prior test moved a unit we rely on).
- *
- * The generic `Reservations.claimed` set is kept for back-compat but is
- * intentionally not used as a hard gate beyond the unitToMove itself.
  */
 
 class PathReservations {
@@ -330,8 +374,16 @@ class PathReservations {
   /** Units appearing in some entry's persisted paths (cannot be moved later). */
   pathUnits = new Set<number>();
 
-  conflictsWithChange(unitToMove: number, paths: number[][]): boolean {
-    if (this.pathUnits.has(unitToMove)) return true;
+  conflictsWithChange(
+    unitToMove: number,
+    paths: number[][],
+    isNoOp = false
+  ): boolean {
+    // A NO_OP does NOT relocate the unit, so it being on OTHER entries' paths
+    // is harmless — skip the `pathUnits` guard for it. (Without this, every
+    // Pikud NO_OP is rejected because its unit sits atop dozens of real moves'
+    // paths.) Real moves still respect it.
+    if (!isNoOp && this.pathUnits.has(unitToMove)) return true;
     for (const path of paths) {
       for (const u of path) {
         if (this.movedUnits.has(u) && u !== unitToMove) return true;
@@ -349,8 +401,11 @@ class PathReservations {
     return false;
   }
 
-  commitChange(unitToMove: number, paths: number[][]): void {
-    this.movedUnits.add(unitToMove);
+  commitChange(unitToMove: number, paths: number[][], isNoOp = false): void {
+    // Only a REAL move pins the unit into `movedUnits` (so no later entry may
+    // rely on it staying put). A NO_OP leaves the unit exactly where it is, so
+    // recording it as "moved" would wrongly block every path through it.
+    if (!isNoOp) this.movedUnits.add(unitToMove);
     for (const path of paths) for (const u of path) this.pathUnits.add(u);
   }
 
@@ -359,16 +414,24 @@ class PathReservations {
   }
 }
 
-function regularClaim(gdudId: number, _idx: TreeIndex): Set<number> {
-  return new Set<number>([gdudId]);
-}
-
-function changeClaim(
-  unitToMove: number,
-  _newParent: number,
-  _idx: TreeIndex
+/**
+ * Parents (old + new) a move reserves WITHIN its makat. Matkal (root) is never
+ * reserved — it is every chain's terminus and shared by all moves.
+ *
+ * Separated from the moved unit (which is pinned GLOBALLY) because parents only
+ * conflict when two entries share BOTH a parent AND a makat: each test sets
+ * values for its own makat, so two children under one parent with DIFFERENT
+ * makats don't corrupt that parent's `Σchildren`. Scoping parents per makat is
+ * what lets each 10-slot band reuse the same scarce Pikud parents.
+ */
+function changeParents(
+  newParent: number,
+  oldParent?: number
 ): Set<number> {
-  return new Set<number>([unitToMove]);
+  const parents = new Set<number>();
+  if (newParent !== ROOT_UNIT_ID) parents.add(newParent);
+  if (oldParent != null && oldParent !== ROOT_UNIT_ID) parents.add(oldParent);
+  return parents;
 }
 
 // ─── Cross-file seeding ─────────────────────────────────────────────────────
@@ -382,9 +445,23 @@ function changeClaim(
 function seedReservationsFromOutputs(
   reservations: Reservations,
   paths: PathReservations,
-  idx: TreeIndex
+  idx: TreeIndex,
+  mode: string
 ): void {
+  // CRITICAL: only seed from the file we're NOT about to overwrite. A
+  // single-mode rebuild rewrites its own output, so seeding from that same
+  // (stale) file would double-book every unit against itself — collapsing a
+  // full 118/120 run down to ~87 as freshly-picked units collide with their
+  // own previous placements. Skip the file this mode is going to replace.
+  const skipFile =
+    mode === 'REGULAR'
+      ? REGULAR_OUTPUT
+      : mode === 'HIERARCHY_CHANGE'
+        ? CHANGE_OUTPUT
+        : null;
+
   for (const file of [REGULAR_OUTPUT, CHANGE_OUTPUT]) {
+    if (file === skipFile) continue;
     if (!fs.existsSync(file)) continue;
     let data: Record<string, unknown>;
     try {
@@ -408,7 +485,17 @@ function seedReservationsFromOutputs(
         ) {
           // Hierarchy-change entry
           if (idx.byId.has(e.unitToMove) && idx.byId.has(e.newParentUnit)) {
-            reservations.commit(changeClaim(e.unitToMove, e.newParentUnit, idx));
+            const oldP =
+              typeof e.oldParentUnit === 'number' ? e.oldParentUnit : undefined;
+            // Pin the moved unit globally; reserve its parents under the
+            // entry's own makat so re-runs stay disjoint per makat.
+            reservations.pin(e.unitToMove);
+            const makat =
+              typeof e.materialId === 'string' ? e.materialId : DEFAULT_MATERIAL_ID;
+            reservations.reserveParents(
+              makat,
+              changeParents(e.newParentUnit, oldP)
+            );
           }
           paths.commitChange(e.unitToMove, [expand, newH]);
           continue;
@@ -418,7 +505,7 @@ function seedReservationsFromOutputs(
           // Regular entry
           const leaf = expand[expand.length - 1];
           if (typeof leaf === 'number' && idx.byId.has(leaf)) {
-            reservations.commit(regularClaim(leaf, idx));
+            reservations.pin(leaf);
           }
           paths.commitRegular([expand]);
         }
@@ -427,23 +514,53 @@ function seedReservationsFromOutputs(
   }
 }
 
-// ─── Material ID sequence ───────────────────────────────────────────────────
-// NOTE: For now every generated entry (REGULAR and HIERARCHY_CHANGE) gets the
-// same default materialId ("000000006"). In the future, replace `next()` with
-// real allocation logic (e.g. discover unique makats per test).
+// ─── Material ID allocation ─────────────────────────────────────────────────
+// Makats are pulled LIVE from the backend (`GET /materials/excel`, via
+// `fetchMakatIds`). Each HIERARCHY_CHANGE array assigns a NEW makat every
+// `MAKAT_GROUP_SIZE` entries (a "band"), so each band has its own private value
+// space. Because the parent-uniqueness reservation is scoped per makat, two
+// bands can safely reuse the same scarce Pikud parents — which is what lets a
+// full 40-slot array fit inside a tree with only 9 Pikuds.
+//
+// REGULAR entries are read-only on aggregations, so they all keep the single
+// default makat for stable, low-diff output.
 
 const DEFAULT_MATERIAL_ID = '000000006';
 
-class MaterialIdSeq {
-  private value: string;
+/** How many consecutive entries share one makat before rotating to the next. */
+const MAKAT_GROUP_SIZE = Number(process.env.MAKAT_GROUP_SIZE ?? 10);
 
-  constructor(_base: string) {
-    // Ignore the base for now — always emit the fixed default.
-    this.value = DEFAULT_MATERIAL_ID;
+/**
+ * Allocates makats in fixed-size bands. `bandIndex(i)` maps a 0-based entry
+ * index to a makat; the same band index always yields the same makat, so the
+ * three HC arrays line up band-for-band (and re-runs are deterministic).
+ *
+ * Falls back to the single default makat when the live list is unavailable, so
+ * the builder still produces output (just with the old single-makat squeeze).
+ */
+class MakatAllocator {
+  private makats: string[];
+  private groupSize: number;
+
+  constructor(makats: string[], groupSize: number = MAKAT_GROUP_SIZE) {
+    this.makats = makats.length > 0 ? makats : [DEFAULT_MATERIAL_ID];
+    this.groupSize = Math.max(1, groupSize);
   }
 
-  next(): string {
-    return this.value;
+  /** Number of distinct makats available. */
+  get size(): number {
+    return this.makats.length;
+  }
+
+  /** The default (first) makat — used by REGULAR and as a safe fallback. */
+  get default(): string {
+    return this.makats[0];
+  }
+
+  /** Makat for the band containing 0-based entry index `i` (wraps if needed). */
+  forIndex(i: number): string {
+    const band = Math.floor(i / this.groupSize);
+    return this.makats[band % this.makats.length];
   }
 }
 
@@ -495,11 +612,11 @@ function pickNextGdud(
     // one): they have no gdud breakdown, so their value cells are disabled and
     // the value-based tests can't set/read them.
     if (!isEmergencyEligible(u.id, idx)) continue;
-    const claim = regularClaim(u.id, idx);
-    if (!reservations.isDisjoint(claim)) continue;
+    // A gdud REGULAR exercises must not be one any entry will MOVE.
+    if (reservations.isPinned(u.id)) continue;
     const expandPath = topDownPath(u.id, idx);
     if (paths.conflictsWithRegular([expandPath])) continue;
-    reservations.commit(claim);
+    reservations.pin(u.id);
     paths.commitRegular([expandPath]);
     alreadyPicked.add(u.id);
     return u.id;
@@ -511,13 +628,13 @@ function buildRegularEntry(
   template: RegularTemplateEntry,
   gdudId: number,
   idx: TreeIndex,
-  matSeq: MaterialIdSeq
+  makat: string
 ): Record<string, unknown> {
   const expandPath = topDownPath(gdudId, idx);
   const lvl = idx.byId.get(gdudId)!.level as number;
   const out: Record<string, unknown> = {
     ...template, // carry through commentText, testValue, rowIndex, index, etc.
-    materialId: matSeq.next(),
+    materialId: makat,
     description: `${template.description ?? 'Test'} [unit ${gdudId} / ${LEVEL_LABEL[lvl] ?? `L${lvl}`}]`,
     unitsToExpand: expandPath,
   };
@@ -530,7 +647,7 @@ function runRegular(
   idx: TreeIndex,
   reservations: Reservations,
   paths: PathReservations,
-  matSeq: MaterialIdSeq
+  makats: MakatAllocator
 ): void {
   console.log('[data-builder] === REGULAR ===');
   const template = readJson(REGULAR_TEMPLATE);
@@ -550,12 +667,12 @@ function runRegular(
     const tmplEntry = arrVal[0] as RegularTemplateEntry;
     const targetCount = tmplEntry.numDataObject;
 
-    // Arrays without numDataObject are unit-independent → pass through,
-    // still allocating unique materialIds.
+    // Arrays without numDataObject are unit-independent → pass through on the
+    // default makat (read-only, no parent contention).
     if (targetCount == null) {
       output[arrayKey] = (arrVal as RegularTemplateEntry[]).map((e) => ({
         ...e,
-        materialId: matSeq.next(),
+        materialId: makats.default,
       }));
       continue;
     }
@@ -570,7 +687,9 @@ function runRegular(
         totalSkipped += 1;
         continue;
       }
-      generated.push(buildRegularEntry(tmplEntry, g, idx, matSeq));
+      // REGULAR is read-only on aggregations, so keep every entry on the single
+      // default makat for stable, low-diff output.
+      generated.push(buildRegularEntry(tmplEntry, g, idx, makats.default));
       totalGenerated += 1;
     }
     output[arrayKey] = generated;
@@ -581,7 +700,7 @@ function runRegular(
 
   writeJson(REGULAR_OUTPUT, output);
   console.log(
-    `[data-builder] REGULAR done — generated ${totalGenerated}, skipped ${totalSkipped}, reserved ${reservations.claimed.size} units total.`
+    `[data-builder] REGULAR done — generated ${totalGenerated}, skipped ${totalSkipped}, pinned ${reservations.pinned.size} units total.`
   );
 }
 
@@ -758,7 +877,8 @@ function pickChangeMove(
   reservations: Reservations,
   paths: PathReservations,
   topUsage: Map<number, number>,
-  uf: UF
+  uf: UF,
+  makat: string
 ): ChangeMove | null {
   type Candidate = {
     unit: HierarchyUnit;
@@ -838,15 +958,30 @@ function pickChangeMove(
       }
 
       // Parallelism guard: newParent must not be a unit that is itself being
-      // moved by another entry (parenting under something in flux). NO_OP is
-      // exempt — its "newParent" is the unit's own current parent, which the
-      // backend's per-child write model already makes race-safe. Backend
-      // guarantees same-newParent and same-oldParent races are safe, so we do
-      // NOT block on those.
-      if (slot.kind !== 'NO_OP' && reservations.claimed.has(cand.id)) continue;
+      // MOVED by another entry (parenting under something in flux). This is a
+      // STRUCTURAL hazard, so it is checked against the GLOBAL pin set,
+      // independent of makat. NO_OP is exempt — its "newParent" is the unit's
+      // own current parent, which the backend's per-child write model already
+      // makes race-safe.
+      if (slot.kind !== 'NO_OP' && reservations.isPinned(cand.id)) continue;
 
-      const claim = changeClaim(unit.id, cand.id, idx);
-      if (!reservations.isDisjoint(claim)) continue;
+      // The moved unit itself must not already be moved/exercised by anyone —
+      // this applies to NO_OP too. A NO_OP asserts the unit STAYS under its
+      // current parent, so if any OTHER entry (e.g. a HORIZONTAL) also moves
+      // that same unit, the NO_OP's precondition is destroyed at run time
+      // (the unit is no longer where it started). Pinning is what prevents a
+      // unit being claimed by both a real move AND a NO_OP. (NO_OP is still
+      // exempt from the PATH-occupancy check below, since it doesn't relocate
+      // the unit — that exemption is what fixed the original Pikud NO_OP skips.)
+      if (reservations.isPinned(unit.id)) continue;
+
+      // Parent-uniqueness, scoped PER MAKAT: two entries may share an old/new
+      // parent only if they use DIFFERENT makats (independent value spaces).
+      // NO_OP intentionally reuses the unit's current parent, so it is exempt.
+      if (slot.kind !== 'NO_OP') {
+        const parents = changeParents(cand.id, oldParent);
+        if (!reservations.parentsAvailable(makat, parents)) continue;
+      }
 
       // Path-disjointness: the moved unit can't already appear on someone
       // else's path, and our two paths can't contain anyone already moved.
@@ -854,7 +989,8 @@ function pickChangeMove(
       const newParentPath =
         cand.id === ROOT_UNIT_ID ? [] : topDownPath(cand.id, idx);
       const newPath = [...newParentPath, unit.id];
-      if (paths.conflictsWithChange(unit.id, [oldPath, newPath])) continue;
+      if (paths.conflictsWithChange(unit.id, [oldPath, newPath], slot.kind === 'NO_OP'))
+        continue;
 
       // ── Score 1: how many existing parallel-clusters this entry would
       // fuse. The aim is to keep clusters small and numerous. We inspect the
@@ -902,8 +1038,21 @@ function pickChangeMove(
 
   const pick = candidates[0];
 
-  reservations.commit(changeClaim(pick.unit.id, pick.cand.id, idx));
-  paths.commitChange(pick.unit.id, [pick.oldPath, pick.newPath]);
+  // ALWAYS pin the chosen unit — including a NO_OP. A NO_OP probe asserts the
+  // unit stays under its current parent, so no OTHER entry may move it; pinning
+  // guarantees that (a real move and a NO_OP can never share a unit). A NO_OP
+  // still does NOT reserve parents (it changes no parent's child set) and is
+  // exempt from the path-occupancy commit (it doesn't relocate the unit), which
+  // is what keeps the scarce Pikud NO_OP slots fillable.
+  const isNoOp = slot.kind === 'NO_OP';
+  reservations.pin(pick.unit.id);
+  if (!isNoOp) {
+    reservations.reserveParents(
+      makat,
+      changeParents(pick.cand.id, pick.oldParent)
+    );
+  }
+  paths.commitChange(pick.unit.id, [pick.oldPath, pick.newPath], isNoOp);
   topUsage.set(pick.oldPath[0], (topUsage.get(pick.oldPath[0]) ?? 0) + 1);
   topUsage.set(pick.newPath[0], (topUsage.get(pick.newPath[0]) ?? 0) + 1);
   // Commit the SAME write-set + root token the consumer will fuse on, so the
@@ -922,7 +1071,7 @@ function buildChangeEntry(
   template: ChangeTemplateEntry,
   move: ChangeMove,
   idx: TreeIndex,
-  matSeq: MaterialIdSeq
+  makat: string
 ): Record<string, unknown> {
   const unitsToExpand = topDownPath(move.unitToMove, idx);
   const newParentPath =
@@ -955,7 +1104,7 @@ function buildChangeEntry(
   const claimedUnits = [...claimedSet].sort((a, b) => a - b);
 
   return {
-    materialId: matSeq.next(),
+    materialId: makat,
     description: `${template.description ?? 'Move'} - Move ${unitLabel}(${move.unitToMove}) from ${oldLabel}(${move.oldParent}) to ${newLabel}(${move.newParent}) [${move.kind}]`,
     hatunit: template.hatunit ?? 1,
     unitsToExpand,
@@ -1046,7 +1195,7 @@ function runHierarchyChange(
   idx: TreeIndex,
   reservations: Reservations,
   paths: PathReservations,
-  matSeq: MaterialIdSeq
+  makats: MakatAllocator
 ): void {
   console.log('[data-builder] === HIERARCHY_CHANGE ===');
   const template = readJson(CHANGE_TEMPLATE);
@@ -1054,6 +1203,20 @@ function runHierarchyChange(
 
   let totalGenerated = 0;
   let totalSkipped = 0;
+
+  // Makat banding: assign a NEW makat every `MAKAT_GROUP_SIZE` slots, and give
+  // each of the three arrays its OWN disjoint block of makats so two arrays
+  // never share one. Parent-uniqueness is scoped per makat, so:
+  //   • within an array, each 10-slot band reuses the scarce Pikud parents
+  //     freely (its own makat), and
+  //   • across arrays, no makat is shared, so their parent reservations never
+  //     collide either.
+  // This is what lets every array fill all 40 slots on a tree with only 9
+  // Pikuds. `bandsPerArray * MAKAT_GROUP_SIZE` is the per-array index stride so
+  // `makats.forIndex` maps (array, slot) → a globally unique band.
+  const bandsPerArray = Math.ceil(HC_SLOT_PATTERN.length / MAKAT_GROUP_SIZE);
+  const makatForSlot = (arrayIndex: number, slotIndex: number): string =>
+    makats.forIndex(arrayIndex * bandsPerArray * MAKAT_GROUP_SIZE + slotIndex);
 
   // Track how often each top-of-path Pikud has been used. The picker uses
   // this to spread moves evenly across all Pikuds (instead of repeatedly
@@ -1086,7 +1249,9 @@ function runHierarchyChange(
     assertSlotFeasible(HC_SLOT_PATTERN[i], i, levelCounts);
   }
 
-  for (const [arrayKey, arrVal] of Object.entries(template)) {
+  for (const [arrayIndex, [arrayKey, arrVal]] of Object.entries(
+    template
+  ).entries()) {
     if (!Array.isArray(arrVal) || arrVal.length === 0) {
       output[arrayKey] = arrVal;
       continue;
@@ -1094,17 +1259,23 @@ function runHierarchyChange(
     const tmplEntry = arrVal[0] as ChangeTemplateEntry;
     const generated: Record<string, unknown>[] = [];
 
-    // ── Slot processing order: ROOT MOVES FIRST ──────────────────────────────
-    // All TO_ROOT (and any other root-child) moves are fused into ONE serial
-    // cluster by the consumer regardless of what else we pick. By committing
-    // their full write-sets to the UF *before* the other 34 slots, the
-    // `mergedComponents` score then actively steers every later pick AWAY from
-    // the root moves' subtrees — so the ~62 non-root entries stay in small,
-    // independent (parallel) clusters instead of being dragged into the root
-    // blob. Output is still emitted in the original slot order for readability.
+    // ── Slot processing order: ROOT MOVES FIRST, NO_OP LAST ──────────────────
+    // 1. TO_ROOT (and other root-child) moves are fused into ONE serial cluster
+    //    by the consumer regardless of what else we pick. Committing their full
+    //    write-sets to the UF *first* lets the `mergedComponents` score steer
+    //    every later pick AWAY from the root moves' subtrees, keeping the
+    //    non-root entries in small, independent (parallel) clusters.
+    // 2. NO_OP slots are processed LAST. A NO_OP now pins its unit (so no real
+    //    move can later relocate a unit a NO_OP probes — the same-parent
+    //    assertion depends on it). Picking NO_OP units AFTER every real move has
+    //    claimed its own unit means NO_OP draws from the leftover pool instead
+    //    of competing for the scarce units the real moves need.
+    // Output is still emitted in the original slot order for readability.
+    const rank = (k: MoveKind): number =>
+      k === 'TO_ROOT' ? 0 : k === 'NO_OP' ? 2 : 1;
     const order = HC_SLOT_PATTERN.map((_, i) => i).sort((a, b) => {
-      const ra = HC_SLOT_PATTERN[a].kind === 'TO_ROOT' ? 0 : 1;
-      const rb = HC_SLOT_PATTERN[b].kind === 'TO_ROOT' ? 0 : 1;
+      const ra = rank(HC_SLOT_PATTERN[a].kind);
+      const rb = rank(HC_SLOT_PATTERN[b].kind);
       return ra !== rb ? ra - rb : a - b;
     });
     const bySlot: (Record<string, unknown> | null)[] = HC_SLOT_PATTERN.map(
@@ -1113,7 +1284,19 @@ function runHierarchyChange(
 
     for (const i of order) {
       const slot = HC_SLOT_PATTERN[i];
-      const move = pickChangeMove(slot, idx, reservations, paths, topUsage, uf);
+      // Makat for THIS slot's band — same band index across all three arrays
+      // would collide on parents, so each array uses its own makat block (see
+      // `makatForSlot`). The makat scopes the parent reservation in the picker.
+      const makat = makatForSlot(arrayIndex, i);
+      const move = pickChangeMove(
+        slot,
+        idx,
+        reservations,
+        paths,
+        topUsage,
+        uf,
+        makat
+      );
       if (!move) {
         console.warn(
           `[data-builder]   ${arrayKey} slot ${i + 1} (${LEVEL_LABEL[slot.unitLevel]} ${slot.kind}): no candidate — skipping.`
@@ -1121,7 +1304,7 @@ function runHierarchyChange(
         totalSkipped += 1;
         continue;
       }
-      bySlot[i] = buildChangeEntry(tmplEntry, move, idx, matSeq);
+      bySlot[i] = buildChangeEntry(tmplEntry, move, idx, makat);
       totalGenerated += 1;
     }
     // Emit in original slot order, dropping skipped slots.
@@ -1134,31 +1317,41 @@ function runHierarchyChange(
 
   writeJson(CHANGE_OUTPUT, output);
   console.log(
-    `[data-builder] HIERARCHY_CHANGE done — generated ${totalGenerated}, skipped ${totalSkipped}, reserved ${reservations.claimed.size} units total.`
+    `[data-builder] HIERARCHY_CHANGE done — generated ${totalGenerated}, skipped ${totalSkipped}, pinned ${reservations.pinned.size} units, ${reservations.parentsByMakat.size} makat(s) used.`
   );
 }
 
-// ─── Material-ID base discovery from templates ──────────────────────────────
+// ─── Live makat discovery ───────────────────────────────────────────────────
 
-function discoverMaterialIdBase(): string {
-  const candidates: string[] = [];
-  for (const file of [REGULAR_TEMPLATE, CHANGE_TEMPLATE]) {
-    if (!fs.existsSync(file)) continue;
-    try {
-      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      for (const v of Object.values(data)) {
-        if (Array.isArray(v)) {
-          for (const e of v) {
-            if (e && typeof e.materialId === 'string') candidates.push(e.materialId);
-          }
-        }
-      }
-    } catch {
-      /* ignore */
-    }
+/**
+ * Pull the live list of usable makats from the backend (`GET /materials/excel`).
+ * The existing default makat is moved to the FRONT so REGULAR (and the first HC
+ * band) keep using it — minimising churn in the generated output. Falls back to
+ * the single default makat if the endpoint is unavailable.
+ */
+async function loadLiveMakats(): Promise<string[]> {
+  console.log('[data-builder] Fetching live makats from backend...');
+  const ctx = await playwrightRequest.newContext();
+  try {
+    const ids = await Promise.race<string[]>([
+      fetchMakatIds(ctx, DEFAULT_MATERIAL_ID),
+      new Promise<string[]>((_, reject) =>
+        setTimeout(() => reject(new Error('Makat fetch timed out (15s)')), 15000)
+      ),
+    ]);
+    console.log(
+      `[data-builder] Fetched ${ids.length} usable makats (group size ${MAKAT_GROUP_SIZE}).`
+    );
+    return ids;
+  } catch (err) {
+    console.warn(
+      `[data-builder] Makat fetch failed (${String((err as Error)?.message ?? err).slice(0, 120)}); ` +
+        `falling back to single default makat ${DEFAULT_MATERIAL_ID}.`
+    );
+    return [DEFAULT_MATERIAL_ID];
+  } finally {
+    await ctx.dispose();
   }
-  candidates.sort();
-  return candidates[0] ?? '000000006';
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -1178,31 +1371,31 @@ async function main(): Promise<void> {
   // When generating only one mode, seed from the OTHER file's existing
   // entries so the two stay disjoint. When generating both, we start clean.
   if (mode === 'REGULAR' || mode === 'HIERARCHY_CHANGE') {
-    seedReservationsFromOutputs(reservations, paths, idx);
-    if (reservations.claimed.size > 0 || paths.movedUnits.size > 0) {
+    seedReservationsFromOutputs(reservations, paths, idx, mode);
+    if (reservations.pinned.size > 0 || paths.movedUnits.size > 0) {
       console.log(
-        `[data-builder] Pre-seeded ${reservations.claimed.size} reserved units and ` +
+        `[data-builder] Pre-seeded ${reservations.pinned.size} pinned units and ` +
           `${paths.movedUnits.size} moved-units / ${paths.pathUnits.size} path-units from existing outputs.`
       );
     }
   }
 
-  const matSeq = new MaterialIdSeq(discoverMaterialIdBase());
+  const makats = new MakatAllocator(await loadLiveMakats());
 
   switch (mode) {
     case 'REGULAR':
-      runRegular(idx, reservations, paths, matSeq);
+      runRegular(idx, reservations, paths, makats);
       break;
     case 'HIERARCHY_CHANGE':
-      runHierarchyChange(idx, reservations, paths, matSeq);
+      runHierarchyChange(idx, reservations, paths, makats);
       break;
     case '':
       // REGULAR is cheap (8 entries × short chains) and entirely read-only,
       // so let it grab a few small disjoint chains first. HC then fills
       // around the reservations, packing the 40-slot matrix into the
       // (still large) unclaimed portion of the tree.
-      runRegular(idx, reservations, paths, matSeq);
-      runHierarchyChange(idx, reservations, paths, matSeq);
+      runRegular(idx, reservations, paths, makats);
+      runHierarchyChange(idx, reservations, paths, makats);
       break;
     default:
       throw new Error(
